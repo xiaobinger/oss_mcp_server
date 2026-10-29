@@ -15,7 +15,7 @@
 
 </div>
 
-> 在 MCP 客户端里说一句「从海科 OSS 下载 lstd/pay/a.png」，模型会自动把「海科」匹配到对应认证分组和 Bucket，然后调用下载工具。
+> 在 MCP 客户端里说一句「从生产 OSS 下载 lstd/pay/a.png」，模型会自动把「生产」匹配到对应认证分组和 Bucket，然后调用下载工具。
 
 ---
 
@@ -150,7 +150,7 @@ chmod +x scripts/mcp_service.sh
   "default_group": "prod",
   "groups": {
     "prod": {
-      "alias": "海科",
+      "alias": "生产",
       "access_key_id": "LTAI5tXXXXXXXXXXXXXX",
       "access_key_secret": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
       "endpoint": "oss-cn-hangzhou.aliyuncs.com",
@@ -180,7 +180,7 @@ chmod +x scripts/mcp_service.sh
 | --- | --- | --- |
 | `default_group` | 否 | 默认分组名，必须是 `groups` 中的键；不填时使用第一个分组 |
 | `groups` | 是 | 非空对象，键为分组名称，值为该分组的配置 |
-| `alias` | 否 | 分组的主别名，便于自然语言指定，如「海科」 |
+| `alias` | 否 | 分组的主别名，便于自然语言指定，如「生产」 |
 | `aliases` | 否 | 额外别名数组，可与 `alias` 同时使用 |
 | `access_key_id` | 是 | 兼容 `accessKeyId`、`accessKey` |
 | `access_key_secret` | 是 | 兼容 `accessKeySecret`、`accessSecret` |
@@ -196,7 +196,7 @@ chmod +x scripts/mcp_service.sh
 分组名称和别名都可以传给工具的 `group` 参数。匹配时：
 
 1. 去掉所有空白字符，并忽略大小写；
-2. 自动兼容常见后缀变体，例如「海科」也可以匹配「海科 OSS」「海科OSS」「海科云存储」；
+2. 自动兼容常见后缀变体，例如「生产」也可以匹配「生产 OSS」「生产OSS」「生产云存储」；
 3. 启动时检查名称/别名冲突，若两个分组被同一个别名命中会直接报错，避免路由到错误的 Bucket；
 4. 不传 `group` 时使用默认分组。
 
@@ -258,7 +258,7 @@ python src/oss_mcp_server.py \
 ```json
 {
   "group": "prod",
-  "group_alias": "海科",
+  "group_alias": "生产",
   "bucket": "prod-bucket",
   "object_name": "lstd/pay/a.png",
   "exists": true
@@ -335,11 +335,11 @@ python src/oss_mcp_server.py --config config/oss_config.json \
 
 ### 自然语言路由示例
 
-配置了 `prod`（别名「海科」）和 `test`（别名「测试」）后：
+配置了 `prod`（别名「生产」）和 `test`（别名「测试」）后：
 
 | 用户说法 | 模型应传入的参数 |
 | --- | --- |
-| 从海科 OSS 下载 `lstd/pay/a.png` | `group="海科"` |
+| 从生产 OSS 下载 `lstd/pay/a.png` | `group="生产"` |
 | 看看测试 OSS 上有没有 `lstd/test/b.png` | `group="测试"` |
 | 上传到 OSS 的 `lstd/pay/c.png` | 不传 `group`，使用默认分组 |
 
