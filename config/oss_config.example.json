@@ -3,13 +3,13 @@
   "http_bearer_token": "",
   "groups": {
     "prod": {
-      "alias": "海科",
+      "alias": "生产",
       "access_key_id": "LTAI5tXXXXXXXXXXXXXX",
       "access_key_secret": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
       "endpoint": "oss-cn-hangzhou.aliyuncs.com",
       "bucket": "prod-bucket",
       "domain": "https://static.example.com",
-      "default_prefix": "lstd/pay/",
+      "default_prefix": "",
       "public_read": true
     },
     "test": {
@@ -19,7 +19,7 @@
       "security_token": "",
       "endpoint": "oss-cn-shanghai.aliyuncs.com",
       "bucket": "test-bucket",
-      "default_prefix": "lstd/test/",
+      "default_prefix": "",
       "public_read": false
     }
   }
