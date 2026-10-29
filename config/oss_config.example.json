@@ -1,0 +1,25 @@
+{
+  "default_group": "prod",
+  "groups": {
+    "prod": {
+      "alias": "海科",
+      "access_key_id": "LTAI5tXXXXXXXXXXXXXX",
+      "access_key_secret": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      "endpoint": "oss-cn-hangzhou.aliyuncs.com",
+      "bucket": "prod-bucket",
+      "domain": "https://static.example.com",
+      "default_prefix": "lstd/pay/",
+      "public_read": true
+    },
+    "test": {
+      "alias": "测试",
+      "access_key_id": "LTAI5tYYYYYYYYYYYYYY",
+      "access_key_secret": "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYY",
+      "security_token": "",
+      "endpoint": "oss-cn-shanghai.aliyuncs.com",
+      "bucket": "test-bucket",
+      "default_prefix": "lstd/test/",
+      "public_read": false
+    }
+  }
+}
