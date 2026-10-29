@@ -14,7 +14,11 @@
 #   chmod +x scripts/mcp_service.sh
 #
 # 可选环境变量：
-#   PYTHON_BIN          指定 Python 解释器（默认优先 .venv/bin/python，其次 python3 / python）
+#   PYTHON_BIN          指定 Python 解释器（默认优先项目虚拟环境；启动时会校验
+#                       oss2 / mcp / uvicorn，缺失时自动尝试下一个可用解释器。
+#                       Windows 为 .venv\Scripts\python.exe / venv\Scripts\python.exe，
+#                       其他系统为 .venv/bin/python / venv/bin/python）
+#   OSS_MCP_AUTO_INSTALL 设为 0 可禁止自动为项目虚拟环境安装缺失依赖（默认 1）
 #   OSS_MCP_CONFIG      配置文件路径（默认 <项目目录>/config/oss_config.json）
 #   OSS_MCP_HOST        监听地址（默认 127.0.0.1）
 #   OSS_MCP_PORT        监听端口（默认 8000）
@@ -59,35 +63,167 @@ OSS MCP 服务管理脚本
   传输方式  $TRANSPORT
   日志文件  $LOG_FILE
 
+启动前会自动检查 Python 及 oss2 / mcp / uvicorn 依赖；项目虚拟环境缺依赖时会尝试自动安装。
+
 可选环境变量：PYTHON_BIN、OSS_MCP_CONFIG、OSS_MCP_HOST、OSS_MCP_PORT、OSS_MCP_TRANSPORT、
-              OSS_MCP_BEARER_TOKEN（监听非本机地址时必填）
+              OSS_MCP_BEARER_TOKEN（监听非本机地址时必填）、OSS_MCP_AUTO_INSTALL（默认 1）
 EOF
 }
 
+detect_platform() {
+    case "$(uname -s 2>/dev/null || printf 'unknown')" in
+        MINGW*|MSYS*|CYGWIN*) printf 'windows\n' ;;
+        *) printf 'unix\n' ;;
+    esac
+}
+
+python_candidates() {
+    local project_dir="${1:-$PROJECT_DIR}"
+    local platform="${2:-$(detect_platform)}"
+    local candidate
+    local -a venv_candidates command_candidates
+
+    if [ "$platform" = "windows" ]; then
+        venv_candidates=(
+            "$project_dir/.venv/Scripts/python.exe"
+            "$project_dir/venv/Scripts/python.exe"
+        )
+        # Windows 应用商店的 python3 常是无依赖的占位程序，优先使用 python
+        command_candidates=(python python3)
+    else
+        venv_candidates=(
+            "$project_dir/.venv/bin/python"
+            "$project_dir/venv/bin/python"
+        )
+        command_candidates=(python3 python)
+    fi
+
+    for candidate in "${venv_candidates[@]}"; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+        fi
+    done
+    for candidate in "${command_candidates[@]}"; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            command -v "$candidate"
+        fi
+    done
+}
+
 resolve_python() {
+    local project_dir="${1:-$PROJECT_DIR}"
+    local platform="${2:-$(detect_platform)}"
     if [ -n "${PYTHON_BIN:-}" ]; then
         printf '%s\n' "$PYTHON_BIN"
         return 0
     fi
     local candidate
-    for candidate in "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/venv/bin/python"; do
+    candidate="$(python_candidates "$project_dir" "$platform" | head -n 1 || true)"
+    [ -n "$candidate" ] || return 1
+    printf '%s\n' "$candidate"
+}
+
+python_has_dependencies() {
+    local python="${1:-}"
+    [ -n "$python" ] || return 1
+    if [ ! -x "$python" ]; then
+        python="$(command -v "$python" 2>/dev/null || true)"
+    fi
+    [ -n "$python" ] && [ -x "$python" ] || return 1
+    "$python" -c 'import sys, oss2, mcp, uvicorn; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
+}
+
+preferred_venv_python() {
+    local project_dir="${1:-$PROJECT_DIR}"
+    local platform="${2:-$(detect_platform)}"
+    local candidate
+    local -a venv_candidates
+
+    if [ "$platform" = "windows" ]; then
+        venv_candidates=(
+            "$project_dir/.venv/Scripts/python.exe"
+            "$project_dir/venv/Scripts/python.exe"
+        )
+    else
+        venv_candidates=(
+            "$project_dir/.venv/bin/python"
+            "$project_dir/venv/bin/python"
+        )
+    fi
+    for candidate in "${venv_candidates[@]}"; do
         if [ -x "$candidate" ]; then
             printf '%s\n' "$candidate"
             return 0
         fi
     done
-    if command -v python3 >/dev/null 2>&1; then
-        command -v python3
+    return 1
+}
+
+select_python() {
+    local project_dir="${1:-$PROJECT_DIR}"
+    local platform="${2:-$(detect_platform)}"
+    local candidate
+
+    if [ -n "${PYTHON_BIN:-}" ]; then
+        local requested="$PYTHON_BIN"
+        if [ ! -x "$requested" ]; then
+            requested="$(command -v "$requested" 2>/dev/null || true)"
+        fi
+        if [ -n "$requested" ] && python_has_dependencies "$requested"; then
+            printf '%s\n' "$requested"
+            return 0
+        fi
+        printf '错误：PYTHON_BIN 指定的解释器不是 Python 3.10+ 或无法导入 oss2 / mcp / uvicorn：%s\n' "$PYTHON_BIN" >&2
+        return 1
+    fi
+
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        if python_has_dependencies "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        printf '提示：%s 不是 Python 3.10+ 或缺少依赖（oss2 / mcp / uvicorn），跳过。\n' "$candidate" >&2
+    done < <(python_candidates "$project_dir" "$platform")
+    return 1
+}
+
+install_python_requirements() {
+    local python="$1"
+    local requirements="${2:-$PROJECT_DIR/requirements.txt}"
+    if [ ! -f "$requirements" ]; then
+        printf '未找到依赖清单：%s\n' "$requirements" >&2
+        return 1
+    fi
+    printf '正在为 %s 安装依赖（%s）...\n' "$python" "$requirements" >&2
+    "$python" -m pip install -r "$requirements" >&2
+}
+
+ensure_python() {
+    local project_dir="${1:-$PROJECT_DIR}"
+    local platform="${2:-$(detect_platform)}"
+    local python venv_python
+
+    if python="$(select_python "$project_dir" "$platform")"; then
+        printf '%s\n' "$python"
         return 0
     fi
-    if command -v python >/dev/null 2>&1; then
-        command -v python
-        return 0
+    if [ -n "${PYTHON_BIN:-}" ]; then
+        return 1
+    fi
+
+    venv_python="$(preferred_venv_python "$project_dir" "$platform" || true)"
+    if [ -n "$venv_python" ] && [ "${OSS_MCP_AUTO_INSTALL:-1}" != "0" ]; then
+        if install_python_requirements "$venv_python" "$project_dir/requirements.txt" \
+            && python_has_dependencies "$venv_python"; then
+            printf '%s\n' "$venv_python"
+            return 0
+        fi
     fi
     return 1
 }
 
-PYTHON="$(resolve_python || true)"
+PYTHON_ANY="$(resolve_python || true)"
 
 check_transport() {
     case "$TRANSPORT" in
@@ -102,8 +238,8 @@ check_transport() {
 }
 
 port_open() {
-    [ -n "${PYTHON:-}" ] || return 1
-    "$PYTHON" - "$1" "$2" <<'PY'
+    [ -n "${PYTHON_ANY:-}" ] || return 1
+    "$PYTHON_ANY" - "$1" "$2" <<'PY'
 import socket
 import sys
 
@@ -172,13 +308,11 @@ print_url() {
 
 start_service() {
     [ -f "$SERVER_SCRIPT" ] || die "未找到服务脚本：$SERVER_SCRIPT"
-    [ -n "${PYTHON:-}" ] || die "未找到 Python，请先安装 Python 3，或通过 PYTHON_BIN 指定解释器。"
-    [ -x "$PYTHON" ] || die "Python 不可执行：$PYTHON"
     [ -f "$CONFIG_FILE" ] || die "未找到配置文件：$CONFIG_FILE
   请先执行：cp \"$PROJECT_DIR/config/oss_config.example.json\" \"$CONFIG_FILE\"
   然后按需修改分组、bucket 和 AccessKey。"
 
-    local pid
+    local pid python_bin
     if pid="$(find_running_pid)"; then
         printf '服务已在运行（PID %s）。\n' "$pid"
         print_url
@@ -191,9 +325,13 @@ start_service() {
         die "端口 $PORT 已被其他进程占用，请更换 OSS_MCP_PORT 或先释放端口。"
     fi
 
-    if ! "$PYTHON" -c "import oss2, mcp" >/dev/null 2>&1; then
-        die "当前 Python 缺少依赖：$PYTHON
-  请执行：\"$PYTHON\" -m pip install oss2 mcp requests"
+    python_bin="$(ensure_python || true)"
+    if [ -z "$python_bin" ]; then
+        die "未找到依赖齐全的 Python（需要 Python 3.10+ 及 oss2、mcp、uvicorn）。
+  已自动检查项目虚拟环境和 PATH 中的 Python；如仍失败，请安装依赖：
+    \"$PROJECT_DIR/venv/Scripts/python.exe\" -m pip install -r \"$PROJECT_DIR/requirements.txt\"   # Windows
+    \"$PROJECT_DIR/.venv/bin/python\" -m pip install -r \"$PROJECT_DIR/requirements.txt\"           # Linux / macOS
+  或通过 PYTHON_BIN 指定已安装依赖的解释器。"
     fi
 
     mkdir -p "$LOG_DIR" "$RUN_DIR"
@@ -202,7 +340,7 @@ start_service() {
         echo "===== $(date '+%Y-%m-%d %H:%M:%S') 启动服务 ====="
     } >>"$LOG_FILE"
 
-    nohup "$PYTHON" "$SERVER_SCRIPT" \
+    nohup "$python_bin" "$SERVER_SCRIPT" \
         --config "$CONFIG_FILE" \
         --transport "$TRANSPORT" \
         --host "$HOST" \
@@ -293,30 +431,32 @@ logs_service() {
     tail -n 50 -f "$LOG_FILE"
 }
 
-check_transport
+if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
+    check_transport
 
-COMMAND="${1:-}"
-case "$COMMAND" in
-    start)
-        start_service
-        ;;
-    stop)
-        stop_service
-        ;;
-    restart)
-        stop_service && start_service
-        ;;
-    status)
-        status_service
-        ;;
-    logs)
-        logs_service
-        ;;
-    help|-h|--help|"")
-        usage
-        ;;
-    *)
-        usage >&2
-        exit 1
-        ;;
-esac
+    COMMAND="${1:-}"
+    case "$COMMAND" in
+        start)
+            start_service
+            ;;
+        stop)
+            stop_service
+            ;;
+        restart)
+            stop_service && start_service
+            ;;
+        status)
+            status_service
+            ;;
+        logs)
+            logs_service
+            ;;
+        help|-h|--help|"")
+            usage
+            ;;
+        *)
+            usage >&2
+            exit 1
+            ;;
+    esac
+fi

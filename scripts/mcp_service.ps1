@@ -10,9 +10,13 @@
       2. 编辑 config\oss_config.json，填写分组、bucket 和 AccessKey
       3. python -m pip install -r requirements.txt
 
+    启动前会自动检查 Python 及 oss2 / mcp / uvicorn 依赖；项目虚拟环境缺依赖时
+    会尝试自动安装。
+
     可选环境变量：
       PYTHON_BIN、OSS_MCP_CONFIG、OSS_MCP_HOST、OSS_MCP_PORT、OSS_MCP_TRANSPORT、
-      OSS_MCP_BEARER_TOKEN（HTTP/SSE 监听非本机地址时必填）
+      OSS_MCP_BEARER_TOKEN（HTTP/SSE 监听非本机地址时必填）、
+      OSS_MCP_AUTO_INSTALL（设为 0 可禁止自动安装缺失依赖，默认 1）
 #>
 param(
     [Parameter(Position = 0)]
@@ -35,26 +39,97 @@ $PidFile = Join-Path $RunDir 'mcp.pid'
 $LogFile = Join-Path $LogDir 'mcp.log'
 $OutLogFile = Join-Path $LogDir 'mcp.out.log'
 
-function Resolve-Python {
+function Test-PythonDependencies {
+    param([string]$Python)
+    if (-not $Python -or -not (Test-Path $Python)) { return $false }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Python -c "import sys, oss2, mcp, uvicorn; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" *> $null
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+function Get-PythonCandidates {
     if ($env:PYTHON_BIN) {
         $candidate = $env:PYTHON_BIN
         if (-not [System.IO.Path]::IsPathRooted($candidate)) {
             $resolved = Get-Command $candidate -ErrorAction SilentlyContinue
-            if ($resolved) { return $resolved.Source }
+            if ($resolved) { return @($resolved.Source) }
         }
-        return $candidate
+        return @($candidate)
     }
-    $candidates = @(
-        (Join-Path $ProjectDir '.venv\Scripts\python.exe'),
-        (Join-Path $ProjectDir 'venv\Scripts\python.exe')
-    )
-    foreach ($candidate in $candidates) {
+    $candidates = New-Object System.Collections.Generic.List[string]
+    foreach ($relative in @('.venv\Scripts\python.exe', 'venv\Scripts\python.exe')) {
+        $candidate = Join-Path $ProjectDir $relative
+        if (Test-Path $candidate) { $candidates.Add($candidate) }
+    }
+    foreach ($name in @('python', 'python3')) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd) { $candidates.Add($cmd.Source) }
+    }
+    return @($candidates | Select-Object -Unique)
+}
+
+function Get-PreferredVenvPython {
+    foreach ($relative in @('.venv\Scripts\python.exe', 'venv\Scripts\python.exe')) {
+        $candidate = Join-Path $ProjectDir $relative
         if (Test-Path $candidate) { return $candidate }
     }
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) { $cmd = Get-Command python3 -ErrorAction SilentlyContinue }
-    if ($cmd) { return $cmd.Source }
     return $null
+}
+
+function Select-Python {
+    $candidates = @(Get-PythonCandidates)
+    $explicit = [bool]$env:PYTHON_BIN
+    foreach ($candidate in $candidates) {
+        if (Test-PythonDependencies $candidate) { return $candidate }
+        if ($explicit) {
+            Write-Host "错误：PYTHON_BIN 指定的解释器不是 Python 3.10+ 或无法导入 oss2 / mcp / uvicorn：$candidate" -ForegroundColor Red
+        } else {
+            Write-Host "提示：$candidate 不是 Python 3.10+ 或缺少依赖（oss2 / mcp / uvicorn），跳过。" -ForegroundColor Yellow
+        }
+    }
+    return $null
+}
+
+function Install-PythonRequirements {
+    param([string]$Python, [string]$Requirements)
+    if (-not (Test-Path $Requirements)) {
+        Write-Host "未找到依赖清单：$Requirements" -ForegroundColor Red
+        return $false
+    }
+    Write-Host "正在为 $Python 安装依赖（$Requirements）..." -ForegroundColor Yellow
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Python -m pip install -r $Requirements 2>&1 | ForEach-Object { Write-Host $_ }
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+function Ensure-Python {
+    $python = Select-Python
+    if ($python) { return $python }
+    if ($env:PYTHON_BIN) { return $null }
+    if ($env:OSS_MCP_AUTO_INSTALL -eq '0') { return $null }
+
+    $venvPython = Get-PreferredVenvPython
+    if ($venvPython) {
+        $installed = Install-PythonRequirements $venvPython (Join-Path $ProjectDir 'requirements.txt')
+        if ($installed -and (Test-PythonDependencies $venvPython)) {
+            return $venvPython
+        }
+    }
+    return $null
+}
+
+function Resolve-Python {
+    return (Get-PythonCandidates | Select-Object -First 1)
 }
 
 $PythonExe = Resolve-Python
@@ -78,8 +153,11 @@ OSS MCP 服务管理脚本（Windows）
   传输方式  $Transport
   日志文件  $LogFile
 
+启动前会自动检查 Python 及 oss2 / mcp / uvicorn 依赖；项目虚拟环境缺依赖时会尝试自动安装。
+
 可选环境变量：PYTHON_BIN、OSS_MCP_CONFIG、OSS_MCP_HOST、OSS_MCP_PORT、OSS_MCP_TRANSPORT、
-              OSS_MCP_BEARER_TOKEN（监听非本机地址时必填）
+              OSS_MCP_BEARER_TOKEN（监听非本机地址时必填）、
+              OSS_MCP_AUTO_INSTALL（默认 1）
 "@ | Write-Host
 }
 
@@ -157,8 +235,10 @@ function Start-ServiceEx {
     if (-not (Test-Path $ConfigFile)) {
         throw "未找到配置文件：$ConfigFile`n请先执行：Copy-Item `"$ProjectDir\config\oss_config.example.json`" `"$ConfigFile`"，然后填写 AccessKey。"
     }
-    if (-not $PythonExe) {
-        throw '未找到 Python，请先安装 Python 3，或通过 PYTHON_BIN 环境变量指定解释器。'
+
+    $pythonExe = Ensure-Python
+    if (-not $pythonExe) {
+        throw "未找到依赖齐全的 Python（需要 Python 3.10+ 及 oss2、mcp、uvicorn）。`n请执行：`n  `"$ProjectDir\venv\Scripts\python.exe`" -m pip install -r `"$ProjectDir\requirements.txt`"`n或通过 PYTHON_BIN 环境变量指定已安装依赖的解释器。"
     }
 
     $existingPid = Find-ServiceProcess
@@ -173,11 +253,6 @@ function Start-ServiceEx {
         throw "端口 $Port 已被其他进程占用，请更换 OSS_MCP_PORT 或先释放端口。"
     }
 
-    & $PythonExe -c "import oss2, mcp" 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "当前 Python 缺少依赖：$PythonExe`n请执行：`"$PythonExe`" -m pip install oss2 mcp requests"
-    }
-
     New-Item -ItemType Directory -Force -Path $LogDir, $RunDir | Out-Null
     if (Test-Path $LogFile) { Move-Item -Force $LogFile "$LogFile.prev" }
     if (Test-Path $OutLogFile) { Move-Item -Force $OutLogFile "$OutLogFile.prev" }
@@ -188,7 +263,7 @@ function Start-ServiceEx {
     $oldIoEncoding = $env:PYTHONIOENCODING
     $env:PYTHONIOENCODING = 'utf-8'
     try {
-        $process = Start-Process -FilePath $PythonExe -ArgumentList $argLine `
+        $process = Start-Process -FilePath $pythonExe -ArgumentList $argLine `
             -WorkingDirectory $ProjectDir -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput $OutLogFile -RedirectStandardError $LogFile
     } finally {
