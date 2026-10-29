@@ -9,6 +9,7 @@
 <p>
   <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/MCP-1.29%2B-6E56CF" alt="MCP 1.29+">
+  <img src="https://img.shields.io/badge/Auth-Bearer%20Token-2EA043" alt="Bearer Token">
   <img src="https://img.shields.io/badge/Aliyun-OSS-FF6A00" alt="Aliyun OSS">
   <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-2F81F7" alt="Platform">
 </p>
@@ -27,6 +28,7 @@
 - [认证分组配置](#认证分组配置)
 - [MCP 工具](#mcp-工具)
 - [接入 MCP 客户端](#接入-mcp-客户端)
+- [HTTP Bearer Token 认证](#http-bearer-token-认证)
 - [服务管理脚本](#服务管理脚本)
 - [命令行工具](#命令行工具)
 - [测试](#测试)
@@ -42,6 +44,7 @@
 - **删除**：支持单个删除和批量删除；批量删除自动去重，并按 OSS 限制每 1000 个一批提交。
 - **访问地址**：公共读 Bucket 可使用自定义域名直链；私有 Bucket 自动生成带有效期的签名 URL。
 - **多分组认证**：一个配置文件管理多套 AccessKey、Endpoint、Bucket，并通过别名做自然语言路由。
+- **HTTP Bearer 认证**：HTTP/SSE 模式支持 Bearer Token；监听非本机地址时强制配置，避免 OSS 能力裸奔。
 - **两种接入方式**：MCP 客户端本地拉起（stdio），或作为后台 HTTP 服务运行（streamable-http / SSE）。
 - **跨平台托管**：提供 Linux / macOS 和 Windows 的启动、停止、重启、状态、日志脚本。
 - **可离线验证**：冒烟测试使用假的 Bucket 客户端，不依赖真实 OSS 凭证即可运行。
@@ -57,9 +60,11 @@ oss_mcp_server/
 │   ├── mcp_service.ps1            # Windows PowerShell 服务管理
 │   └── mcp_service.bat            # Windows 双击 / CMD 入口
 ├── src/
+│   ├── http_auth.py               # HTTP Bearer Token 中间件与启动策略
 │   ├── oss_mcp_server.py          # MCP 服务层：配置、分组路由、10 个工具
 │   └── oss_utils.py               # OSS 原子操作层 + 命令行入口
 ├── tests/
+│   ├── smoke_http_auth.py         # Bearer Token 校验与强制策略测试
 │   ├── smoke_oss_utils.py         # OSS 操作冒烟测试
 │   └── smoke_mcp_server.py        # MCP stdio / HTTP 冒烟测试
 ├── requirements.txt
@@ -73,9 +78,10 @@ oss_mcp_server/
 | --- | --- |
 | `config/` | 只放配置模板；真实的 `oss_config.json` 已被 `.gitignore` 排除 |
 | `src/oss_utils.py` | 封装 oss2，提供可复用的上传、下载、删除、URL、存在性判断能力 |
+| `src/http_auth.py` | Bearer Token 中间件、Token 校验和监听地址安全策略 |
 | `src/oss_mcp_server.py` | 读取配置、解析分组别名、注册 MCP 工具并选择传输方式 |
 | `scripts/` | 进程托管、日志、PID、端口检查，不包含业务逻辑 |
-| `tests/` | 无真实凭证的冒烟测试，覆盖原子操作和 MCP 协议链路 |
+| `tests/` | 无真实凭证的冒烟测试，覆盖原子操作、HTTP 认证和 MCP 协议链路 |
 
 运行时还会自动生成 `logs/`、`run/` 和 Python 的 `__pycache__/`，它们都不会进入 Git。
 
@@ -115,7 +121,7 @@ cp config/oss_config.example.json config/oss_config.json
 Copy-Item config\oss_config.example.json config\oss_config.json
 ```
 
-编辑 `config/oss_config.json`，填入真实的 AccessKey、Endpoint、Bucket 和别名。真实配置文件包含凭证，**不要提交到 Git**。
+编辑 `config/oss_config.json`，填入真实的 AccessKey、Endpoint、Bucket 和别名。对外提供 HTTP 服务时，还要填写 `http_bearer_token` 或设置 `OSS_MCP_BEARER_TOKEN`。真实配置文件包含凭证，**不要提交到 Git**。
 
 ### 4. 启动
 
@@ -124,8 +130,14 @@ Copy-Item config\oss_config.example.json config\oss_config.json
 直接启动 HTTP 服务：
 
 ```bash
+# 仅本机访问：未配置 Token 时允许启动
 python src/oss_mcp_server.py --config config/oss_config.json \
   --transport streamable-http --host 127.0.0.1 --port 8000
+
+# 对外监听：必须配置 Bearer Token
+python src/oss_mcp_server.py --config config/oss_config.json \
+  --transport streamable-http --host 0.0.0.0 --port 8000 \
+  --bearer-token "<至少 16 位的随机 Token>"
 ```
 
 后台托管：
@@ -139,7 +151,7 @@ chmod +x scripts/mcp_service.sh
 .\scripts\mcp_service.bat start
 ```
 
-默认访问地址为 `http://127.0.0.1:8000/mcp`。
+默认访问地址为 `http://127.0.0.1:8000/mcp`。HTTP 认证细节见 [HTTP Bearer Token 认证](#http-bearer-token-认证)。
 
 ## 认证分组配置
 
@@ -148,6 +160,7 @@ chmod +x scripts/mcp_service.sh
 ```json
 {
   "default_group": "prod",
+  "http_bearer_token": "",
   "groups": {
     "prod": {
       "alias": "生产",
@@ -179,6 +192,7 @@ chmod +x scripts/mcp_service.sh
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `default_group` | 否 | 默认分组名，必须是 `groups` 中的键；不填时使用第一个分组 |
+| `http_bearer_token` | 对外监听时必填 | HTTP/SSE 模式的 Bearer Token，至少 16 个可打印 ASCII 字符且不能含空白；仅本机监听时可留空 |
 | `groups` | 是 | 非空对象，键为分组名称，值为该分组的配置 |
 | `alias` | 否 | 分组的主别名，便于自然语言指定，如「生产」 |
 | `aliases` | 否 | 额外别名数组，可与 `alias` 同时使用 |
@@ -190,6 +204,14 @@ chmod +x scripts/mcp_service.sh
 | `domain` | 否 | 自定义访问域名；未写协议时自动补 `https://`，公共读时优先用于拼接 URL |
 | `default_prefix` | 否 | 生成 URL 时的默认目录前缀，兼容 `defaultPrefix`、`prefix`，默认 `lstd/pay/` |
 | `public_read` | 否 | JSON 布尔值，兼容 `publicRead`；默认 `false`（签名 URL） |
+
+`http_bearer_token` 是配置文件根节点字段，不要放进某个分组内部。`public_read` 等布尔字段请使用 JSON 布尔值，不要写成字符串。
+
+生成一个足够随机的 Token：
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
 
 ### 别名是如何匹配的
 
@@ -297,11 +319,17 @@ python src/oss_mcp_server.py \
 
 ### 方式二：streamable-http
 
-先启动服务：
+先启动服务。本机未配置 Token 时可直接访问；启用认证后，客户端必须带 `Authorization` 请求头：
 
 ```bash
+# 本机免 Token（默认）
 python src/oss_mcp_server.py --config config/oss_config.json \
   --transport streamable-http --host 127.0.0.1 --port 8000
+
+# 启用 Bearer Token
+python src/oss_mcp_server.py --config config/oss_config.json \
+  --transport streamable-http --host 127.0.0.1 --port 8000 \
+  --bearer-token "$OSS_MCP_BEARER_TOKEN"
 ```
 
 MCP 端点为：
@@ -310,28 +338,32 @@ MCP 端点为：
 http://127.0.0.1:8000/mcp
 ```
 
-支持 URL 接入的客户端可以这样配置：
+支持 URL 和自定义请求头的客户端可以这样配置：
 
 ```json
 {
   "mcpServers": {
     "oss-http": {
-      "url": "http://127.0.0.1:8000/mcp"
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer <TOKEN>"
+      }
     }
   }
 }
 ```
 
-如果客户端要求显式指定传输类型，请按其文档补充 `streamable-http` 类型字段。
+如果客户端不支持自定义请求头，就无法连接已启用 Bearer 认证的 HTTP 服务，请改用 stdio，或通过支持注入请求头的反向代理/客户端插件接入。若客户端要求显式指定传输类型，请按其文档补充 `streamable-http` 类型字段。
 
 ### 方式三：SSE（兼容旧客户端）
 
 ```bash
 python src/oss_mcp_server.py --config config/oss_config.json \
-  --transport sse --host 127.0.0.1 --port 8000
+  --transport sse --host 127.0.0.1 --port 8000 \
+  --bearer-token "$OSS_MCP_BEARER_TOKEN"
 ```
 
-端点为 `http://127.0.0.1:8000/sse`。新客户端优先使用 streamable-http。
+端点为 `http://127.0.0.1:8000/sse`，同样需要通过 `Authorization: Bearer <TOKEN>` 请求头认证。新客户端优先使用 streamable-http。
 
 ### 自然语言路由示例
 
@@ -344,6 +376,99 @@ python src/oss_mcp_server.py --config config/oss_config.json \
 | 上传到 OSS 的 `lstd/pay/c.png` | 不传 `group`，使用默认分组 |
 
 服务初始化信息中会列出所有分组和别名，工具的 `group` 参数描述也会动态写入别名列表，模型不需要猜测。
+
+## HTTP Bearer Token 认证
+
+Bearer Token 只作用于 HTTP/SSE 传输，stdio 由本地客户端直接拉起进程，不经过网络。启用后，`/mcp`、`/sse` 及后续会话请求都必须携带：
+
+```http
+Authorization: Bearer <TOKEN>
+```
+
+### Token 来源与优先级
+
+| 优先级 | 来源 | 示例 |
+| --- | --- | --- |
+| 1 | 命令行参数 | `--bearer-token "<TOKEN>"` |
+| 2 | 环境变量 | `OSS_MCP_BEARER_TOKEN="<TOKEN>"` |
+| 3 | 配置文件根节点 | `"http_bearer_token": "<TOKEN>"` |
+
+推荐把 Token 放入环境变量或已被 `.gitignore` 排除的 `config/oss_config.json`，不要写进脚本、README 或提交记录。命令行参数可能出现在进程列表中，生产环境优先使用环境变量或配置文件。Token 至少 16 个字符，只能包含可打印 ASCII 字符（不能使用中文等非 ASCII 字符），不能包含空白字符；日志只记录“认证已启用”，不会输出 Token。
+
+### 强制策略
+
+| 监听地址 | 是否配置 Token | 行为 |
+| --- | --- | --- |
+| `127.0.0.1` / `localhost` / `::1` | 否 | 警告后允许启动，方便本地开发 |
+| 本机地址 | 是 | 所有 HTTP 请求校验 Token |
+| `0.0.0.0` / 局域网 IP / 公网 IP | 否 | 拒绝启动并提示配置 Token |
+| 非本机地址 | 是 | 允许启动，所有 HTTP 请求校验 Token |
+
+服务没有 TLS。对外监听时应放在反向代理之后，由代理提供 HTTPS，并限制来源 IP；Bearer Token 只解决“调用方是否持有令牌”，不能替代网络边界和 TLS。
+
+### 验证认证是否生效
+
+```bash
+# 未携带 Token：应返回 401
+curl -i http://127.0.0.1:8000/mcp
+
+# 携带 Token：认证通过后返回 MCP 协议层的响应
+curl -i -H "Authorization: Bearer $OSS_MCP_BEARER_TOKEN" \
+  http://127.0.0.1:8000/mcp
+```
+
+未认证响应示例：
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer realm="oss-mcp"
+Content-Type: application/json; charset=utf-8
+
+{"error":"unauthorized","message":"Missing or invalid Bearer token"}
+```
+
+如果普通 GET 在认证通过后返回 `406 Not Acceptable`，说明已经通过 Token 校验，只是请求不符合 MCP 会话握手要求；用 MCP 客户端初始化会话即可。
+
+### 常见配置示例
+
+Linux / macOS 环境变量：
+
+```bash
+export OSS_MCP_BEARER_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+./scripts/mcp_service.sh restart
+```
+
+Windows PowerShell：
+
+```powershell
+$env:OSS_MCP_BEARER_TOKEN = "请替换为至少16位的随机Token"
+.\scripts\mcp_service.ps1 restart
+```
+
+配置文件方式：
+
+```json
+{
+  "default_group": "prod",
+  "http_bearer_token": "请替换为至少16位的随机Token",
+  "groups": {
+    "prod": {
+      "access_key_id": "LTAI...",
+      "access_key_secret": "...",
+      "endpoint": "oss-cn-hangzhou.aliyuncs.com",
+      "bucket": "prod-bucket"
+    }
+  }
+}
+```
+
+客户端配置中的请求头：
+
+```json
+"headers": {
+  "Authorization": "Bearer 请替换为实际Token"
+}
+```
 
 ## 服务管理脚本
 
@@ -412,6 +537,7 @@ Windows 脚本使用隐藏窗口的 `Start-Process` 托管进程，并设置 `PY
 | `OSS_MCP_HOST` | `127.0.0.1` | 监听地址 |
 | `OSS_MCP_PORT` | `8000` | 监听端口 |
 | `OSS_MCP_TRANSPORT` | `streamable-http` | `streamable-http` 或 `sse` |
+| `OSS_MCP_BEARER_TOKEN` | 无 | HTTP/SSE 的 Bearer Token；监听非本机地址时必填，会继承给服务进程 |
 
 示例：
 
@@ -424,7 +550,7 @@ $env:OSS_MCP_PORT = "8010"
 .\scripts\mcp_service.ps1 restart
 ```
 
-> 修改 `OSS_MCP_HOST` 前请阅读[安全建议](#安全建议)。服务本身没有内置鉴权，不要直接暴露到公网。
+> 修改 `OSS_MCP_HOST` 前请阅读[HTTP Bearer Token 认证](#http-bearer-token-认证)和[安全建议](#安全建议)。监听非本机地址必须配置 Token，且应放在 TLS 反向代理之后。
 
 ### 运行时文件
 
@@ -510,12 +636,16 @@ python src/oss_utils.py <认证参数> \
 在项目根目录执行：
 
 ```bash
+python tests/smoke_http_auth.py
 python tests/smoke_oss_utils.py
 python tests/smoke_mcp_server.py
 ```
 
 测试覆盖：
 
+- Bearer Token 缺失/错误返回 401，正确 Token 可完成 MCP 会话；
+- Token 强度、来源优先级、本机免 Token 和非本机强制 Token 策略；
+- 认证日志不会泄露 Token；
 - 本地上传、URL 上传、ACL 请求头、非法 ACL 拒绝；
 - 单文件下载、多文件 ZIP、目录 ZIP、空目录报错；
 - 对象存在性判断（存在 / 不存在 / 空路径）；
@@ -538,25 +668,31 @@ python tests/smoke_mcp_server.py
 | PowerShell 提示禁止运行脚本 | 使用 `powershell -ExecutionPolicy Bypass -File .\scripts\mcp_service.ps1 start` |
 | MCP 客户端看不到工具 | 检查客户端配置中的脚本路径、Python 路径和配置文件路径是否为绝对路径；确认依赖安装在同一 Python 环境 |
 | HTTP 客户端连接失败 | 确认服务监听地址、端口和端点 `/mcp`；远程访问时检查防火墙和 Host 校验设置 |
+| HTTP 返回 `401 Unauthorized` | 客户端没有携带或携带了错误的 `Authorization: Bearer <TOKEN>`；检查 Token 来源优先级和客户端请求头 |
+| 监听非本机地址启动失败 | 未配置 Bearer Token；设置 `--bearer-token`、`OSS_MCP_BEARER_TOKEN` 或配置 `http_bearer_token` |
+| `Token 长度至少为 16 个字符` / `不能包含空白字符` / `只能包含可打印的 ASCII 字符` | 重新生成合规 Token：`python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| 修改 Token 后客户端仍 401 | 重启服务并更新客户端请求头；环境变量优先级高于配置文件 |
 | `AccessDenied` / `NoSuchBucket` | 检查 AccessKey 权限、Bucket 名称、Endpoint 区域是否匹配 |
 | `未知的认证分组或别名` | 调用 `list_groups` 查看实际名称；检查多个分组是否存在别名冲突 |
 | Windows 日志中文乱码 | 使用脚本启动（已设置 UTF-8）；直接运行时设置 `PYTHONIOENCODING=utf-8` |
 
 ## 安全建议
 
-- **不要提交真实配置**：只提交 `config/oss_config.example.json`；`config/oss_config.json` 已被 `.gitignore` 排除。
+- **不要提交真实配置**：只提交 `config/oss_config.example.json`；`config/oss_config.json` 已被 `.gitignore` 排除，其中可能同时包含 AccessKey 和 Bearer Token。
 - **最小权限**：为 MCP 单独创建 RAM 用户或 STS 临时凭证，只授予需要的 Bucket / 前缀权限，避免使用主账号 AccessKey。
 - **谨慎开放删除能力**：`delete_file`、`delete_files` 不可恢复；建议开启 Bucket 版本控制或定期备份，并在客户端启用人工确认。
-- **HTTP 服务默认只监听本机**：`127.0.0.1` 不会暴露到局域网。服务没有内置鉴权，如需远程访问，请通过反向代理增加 TLS 和认证，并用防火墙限制来源。
+- **HTTP 服务优先只监听本机**：`127.0.0.1` 不会暴露到局域网。监听非本机地址时服务强制要求 Bearer Token，但仍应通过反向代理增加 TLS、来源限制和访问日志。
+- **妥善保管 Bearer Token**：使用至少 16 位可打印 ASCII 的随机值，优先放在环境变量或已被忽略的配置文件中；怀疑泄露时立即轮换 Token 并重启服务。
+- **令牌不是用户体系**：当前 Bearer Token 是所有客户端共享的静态令牌，只表示“持有令牌”，不提供用户身份、权限分级或审计归属。
 - **避免公共读写**：除非确有需要，不要使用 `public-read-write`；公共读文件应确认不包含敏感信息。
 - **及时轮换凭证**：一旦发现泄露，立即在阿里云控制台禁用并轮换 AccessKey。
-- **保护日志**：日志可能包含对象路径和错误详情，分享前先检查并脱敏。
+- **保护日志**：日志可能包含对象路径和错误详情，分享前先检查并脱敏；服务不会主动记录 Bearer Token。
 
 ## 已知限制
 
 - 目录下载当前按对象顺序串行下载，超大目录耗时取决于网络和对象数量。
 - URL 上传会先把远程内容读入内存，超大文件建议先落盘再使用 `upload_file`。
 - 不提供断点续传、分片上传进度展示或下载限速。
-- HTTP 模式没有内置用户认证，定位是受控网络内的本地服务。
+- HTTP 模式使用单个静态 Bearer Token，不区分用户、不提供按工具授权、用量限流或 Token 自动轮换。
 - `file_exists` 只做精确对象匹配；判断“目录是否存在”需要按前缀列出对象，本工具不提供该语义。
 - 冒烟测试使用假 Bucket，不能替代真实 OSS 的权限和网络联调。

@@ -11,7 +11,8 @@
       3. python -m pip install -r requirements.txt
 
     可选环境变量：
-      PYTHON_BIN、OSS_MCP_CONFIG、OSS_MCP_HOST、OSS_MCP_PORT、OSS_MCP_TRANSPORT
+      PYTHON_BIN、OSS_MCP_CONFIG、OSS_MCP_HOST、OSS_MCP_PORT、OSS_MCP_TRANSPORT、
+      OSS_MCP_BEARER_TOKEN（HTTP/SSE 监听非本机地址时必填）
 #>
 param(
     [Parameter(Position = 0)]
@@ -77,7 +78,8 @@ OSS MCP 服务管理脚本（Windows）
   传输方式  $Transport
   日志文件  $LogFile
 
-可选环境变量：PYTHON_BIN、OSS_MCP_CONFIG、OSS_MCP_HOST、OSS_MCP_PORT、OSS_MCP_TRANSPORT
+可选环境变量：PYTHON_BIN、OSS_MCP_CONFIG、OSS_MCP_HOST、OSS_MCP_PORT、OSS_MCP_TRANSPORT、
+              OSS_MCP_BEARER_TOKEN（监听非本机地址时必填）
 "@ | Write-Host
 }
 

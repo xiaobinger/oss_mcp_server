@@ -3,6 +3,7 @@
 支持多组 AccessKey 认证信息，通过 JSON 配置文件管理，例如 config/oss_config.json：
 {
   "default_group": "prod",
+  "http_bearer_token": "HTTP/SSE 模式的 Bearer Token（可选；监听非本机地址时必填）",
   "groups": {
     "prod": {
       "alias": "海科",
@@ -40,6 +41,11 @@
 
 单分组参数也可通过环境变量 OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET /
 OSS_SECURITY_TOKEN / OSS_ENDPOINT / OSS_BUCKET / OSS_DOMAIN / OSS_DEFAULT_PREFIX 提供。
+
+HTTP/SSE 模式支持 Bearer Token 认证，优先级为 --bearer-token > 环境变量
+OSS_MCP_BEARER_TOKEN > 配置文件根节点 http_bearer_token。监听本机地址时可不配置；
+监听非本机地址时必须配置，否则拒绝启动。Token 至少 16 个可打印 ASCII 字符，
+且不能包含空白字符。
 """
 import argparse
 import json
@@ -54,6 +60,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 
+import http_auth
 import oss_utils
 
 DEFAULT_CONFIG_NAME = "oss_config.json"
@@ -71,7 +78,6 @@ mcp = FastMCP(
 )
 
 _OSS_ERRORS = (oss2.exceptions.OssError, requests.RequestException, ValueError, OSError)
-_LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 # 分组名 -> {"config": dict, "bucket": oss2.Bucket}
 _groups = {}
@@ -191,8 +197,12 @@ def _load_config_file(path):
     if not isinstance(raw_groups, dict) or not raw_groups:
         raise ValueError("配置文件缺少非空的 groups 对象")
 
+    http_bearer_token = data.get("http_bearer_token")
+    if http_bearer_token is not None and not isinstance(http_bearer_token, str):
+        raise ValueError("配置字段 http_bearer_token 必须是字符串")
+
     groups = {name: _build_group(name, raw) for name, raw in raw_groups.items()}
-    return groups, data.get("default_group") or data.get("default")
+    return groups, data.get("default_group") or data.get("default"), http_bearer_token
 
 
 def _group_help_text():
@@ -581,6 +591,9 @@ def _build_parser():
                         help="单分组模式：Bucket 是否公共读")
     parser.add_argument("--transport", choices=["stdio", "sse", "streamable-http"], default="stdio",
                         help="传输方式：stdio（默认，本地客户端拉起）或 HTTP 模式")
+    parser.add_argument("--bearer-token",
+                        help="HTTP/SSE 模式的 Bearer Token；也可用环境变量 OSS_MCP_BEARER_TOKEN "
+                             "或配置文件根节点的 http_bearer_token")
     parser.add_argument("--host", default=os.environ.get("OSS_MCP_HOST", "127.0.0.1"),
                         help="HTTP 模式监听地址，默认 127.0.0.1")
     parser.add_argument("--port", type=int, default=int(os.environ.get("OSS_MCP_PORT", "8000")),
@@ -588,13 +601,38 @@ def _build_parser():
     return parser
 
 
+def _run_http(transport, bearer_token):
+    """启动 HTTP/SSE 服务，并在配置了 Token 时套上 Bearer 认证中间件。"""
+    import uvicorn
+
+    if transport == "streamable-http":
+        app = mcp.streamable_http_app()
+        path = "/mcp"
+    else:
+        app = mcp.sse_app()
+        path = "/sse"
+
+    if bearer_token:
+        app = http_auth.BearerTokenMiddleware(app, bearer_token)
+
+    print(f"OSS MCP 服务已启动：http://{mcp.settings.host}:{mcp.settings.port}{path}（transport={transport}）", file=sys.stderr)
+    config = uvicorn.Config(
+        app,
+        host=mcp.settings.host,
+        port=mcp.settings.port,
+        log_level=mcp.settings.log_level.lower(),
+    )
+    uvicorn.Server(config).run()
+
+
 def main(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    config_http_token = None
     try:
         if args.config:
-            groups, default_group = _load_config_file(args.config)
+            groups, default_group, config_http_token = _load_config_file(args.config)
             _apply_groups(groups, args.default_group or default_group)
         elif any((args.access_key_id, args.access_key_secret, args.endpoint, args.bucket)):
             missing = [name for name, value in (
@@ -619,7 +657,7 @@ def main(argv=None):
             }
             _apply_groups({"default": _build_group("default", raw)}, "default")
         elif os.path.isfile(DEFAULT_CONFIG_PATH):
-            groups, default_group = _load_config_file(DEFAULT_CONFIG_PATH)
+            groups, default_group, config_http_token = _load_config_file(DEFAULT_CONFIG_PATH)
             _apply_groups(groups, args.default_group or default_group)
         else:
             parser.error(
@@ -636,19 +674,32 @@ def main(argv=None):
         mcp.run(transport="stdio")
         return 0
 
+    try:
+        bearer_token = http_auth.resolve_http_auth(
+            args.host,
+            args.bearer_token,
+            os.environ.get("OSS_MCP_BEARER_TOKEN"),
+            config_http_token,
+        )
+    except ValueError as exc:
+        parser.error(f"HTTP 认证配置错误：{exc}")
+
     mcp.settings.host = args.host
     mcp.settings.port = args.port
-    if args.host not in _LOCAL_HOSTS:
+    if not http_auth.is_local_host(args.host):
         # 非本机监听时放开 Host 校验，否则远程客户端会被 DNS 重绑定保护拦截
         mcp.settings.transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
         print(
-            "警告：服务监听在非本机地址且没有内置鉴权，任何能访问该端口的人都能操作 OSS，请确保网络访问受控。",
+            "警告：服务监听在非本机地址，请通过 TLS/反向代理限制访问来源并妥善保管 Bearer Token。",
             file=sys.stderr,
         )
 
-    path = "/mcp" if args.transport == "streamable-http" else "/sse"
-    print(f"OSS MCP 服务已启动：http://{args.host}:{args.port}{path}（transport={args.transport}）", file=sys.stderr)
-    mcp.run(transport=args.transport)
+    if bearer_token:
+        print("HTTP Bearer Token 认证已启用。", file=sys.stderr)
+    else:
+        print("提示：HTTP 服务未启用 Bearer Token，仅允许本机访问。", file=sys.stderr)
+
+    _run_http(args.transport, bearer_token)
     return 0
 
 

@@ -89,6 +89,11 @@ oss_utils.setQuiet(True)
 with socket.socket() as _probe:
     _probe.bind(("127.0.0.1", 0))
     HTTP_PORT = _probe.getsockname()[1]
+with socket.socket() as _probe:
+    _probe.bind(("127.0.0.1", 0))
+    AUTH_HTTP_PORT = _probe.getsockname()[1]
+
+AUTH_TOKEN = "http-auth-token-0123456789abcdef"
 
 tmp = tempfile.mkdtemp(prefix="oss_mcp_groups_")
 print("tmp:", tmp)
@@ -122,7 +127,8 @@ with open(config_path, "w", encoding="utf-8") as f:
     }, f, ensure_ascii=False)
 
 with mock.patch.object(oss_utils, "createBucketClient", side_effect=fake_create_bucket):
-    groups, default_group = server._load_config_file(config_path)
+    groups, default_group, http_token = server._load_config_file(config_path)
+    assert http_token is None, http_token
     server._apply_groups(groups, default_group)
 
 print("default group:", server._default_group)
@@ -328,7 +334,7 @@ with open(dup_path, "w", encoding="utf-8") as f:
     }}, f)
 with mock.patch.object(oss_utils, "createBucketClient", side_effect=fake_create_bucket):
     try:
-        groups, default_group = server._load_config_file(dup_path)
+        groups, default_group, _ = server._load_config_file(dup_path)
         server._apply_groups(groups, default_group)
         raise AssertionError("duplicate alias should fail")
     except ValueError as exc:
@@ -405,6 +411,95 @@ finally:
     http_log.close()
     with open(http_log_path, "rb") as f:
         print("server log tail:", f.read()[-300:].decode("utf-8", "replace"))
+
+# HTTP Bearer Token 认证（配置文件注入）
+auth_config_path = os.path.join(tmp, "oss_config_auth.json")
+with open(config_path, "r", encoding="utf-8") as f:
+    auth_config = json.load(f)
+auth_config["http_bearer_token"] = AUTH_TOKEN
+with open(auth_config_path, "w", encoding="utf-8") as f:
+    json.dump(auth_config, f, ensure_ascii=False)
+
+auth_log_path = os.path.join(tmp, "http_auth_server.log")
+auth_log = open(auth_log_path, "wb")
+auth_proc = subprocess.Popen(
+    [
+        sys.executable, os.path.join(TOOLS_DIR, "oss_mcp_server.py"), "--config", auth_config_path,
+        "--transport", "streamable-http", "--port", str(AUTH_HTTP_PORT),
+    ],
+    cwd=TOOLS_DIR, stdout=auth_log, stderr=subprocess.STDOUT,
+)
+
+
+def fetch_status(url, headers=None):
+    request = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(request, timeout=1) as response:
+            return response.status, response.headers
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers
+
+
+try:
+    auth_url = f"http://127.0.0.1:{AUTH_HTTP_PORT}/mcp"
+    for _ in range(50):
+        try:
+            status, _headers = fetch_status(auth_url)
+        except Exception:
+            time.sleep(0.2)
+            continue
+        if status:
+            break
+    else:
+        raise AssertionError("auth HTTP server did not start")
+
+    status, headers = fetch_status(auth_url)
+    assert status == 401, status
+    assert headers.get("WWW-Authenticate") == 'Bearer realm="oss-mcp"', headers
+
+    status, _headers = fetch_status(auth_url, {"Authorization": "Bearer wrong-token"})
+    assert status == 401, status
+
+    from mcp.client.streamable_http import streamablehttp_client
+
+    async def auth_http_test():
+        async with streamablehttp_client(
+            auth_url, headers={"Authorization": f"Bearer {AUTH_TOKEN}"}
+        ) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.list_tools()
+                print("auth http tools:", [t.name for t in result.tools])
+                assert len(result.tools) == 10
+
+    asyncio.run(auth_http_test())
+finally:
+    auth_proc.terminate()
+    try:
+        auth_proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        auth_proc.kill()
+        auth_proc.wait()
+    auth_log.close()
+    with open(auth_log_path, "rb") as f:
+        auth_log_text = f.read().decode("utf-8", "replace")
+    print("auth server log tail:", auth_log_text[-300:])
+    assert AUTH_TOKEN not in auth_log_text, "Bearer token must not be written to logs"
+
+# 非本机监听但缺少 Token：必须在启动前被拒绝
+with mock.patch.object(server, "_run_http") as run_http:
+    try:
+        server.main([
+            "--config", config_path,
+            "--transport", "streamable-http",
+            "--host", "0.0.0.0",
+            "--port", "1",
+        ])
+    except SystemExit as exc:
+        assert exc.code == 2, exc.code
+    else:
+        raise AssertionError("external HTTP without bearer token should be rejected")
+    run_http.assert_not_called()
 
 print("ALL MULTI-GROUP MCP TESTS PASSED")
 shutil.rmtree(tmp, ignore_errors=True)

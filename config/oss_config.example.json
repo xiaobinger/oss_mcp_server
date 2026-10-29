@@ -1,5 +1,6 @@
 {
   "default_group": "prod",
+  "http_bearer_token": "",
   "groups": {
     "prod": {
       "alias": "海科",

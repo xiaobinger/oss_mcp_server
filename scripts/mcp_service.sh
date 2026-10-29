@@ -19,6 +19,7 @@
 #   OSS_MCP_HOST        监听地址（默认 127.0.0.1）
 #   OSS_MCP_PORT        监听端口（默认 8000）
 #   OSS_MCP_TRANSPORT   streamable-http（默认）或 sse
+#   OSS_MCP_BEARER_TOKEN HTTP/SSE 模式的 Bearer Token；监听非本机地址时必填
 
 set -u
 
@@ -58,7 +59,8 @@ OSS MCP 服务管理脚本
   传输方式  $TRANSPORT
   日志文件  $LOG_FILE
 
-可选环境变量：PYTHON_BIN、OSS_MCP_CONFIG、OSS_MCP_HOST、OSS_MCP_PORT、OSS_MCP_TRANSPORT
+可选环境变量：PYTHON_BIN、OSS_MCP_CONFIG、OSS_MCP_HOST、OSS_MCP_PORT、OSS_MCP_TRANSPORT、
+              OSS_MCP_BEARER_TOKEN（监听非本机地址时必填）
 EOF
 }
 
