@@ -164,7 +164,7 @@ def replaceFile(local_path, object_name, keep_original_name=True, acl=None, buck
 
 def get_oss_image_url(
         relative_path: str,
-        prefix: str = "lstd/pay/",  # OSS存储的目录前缀
+        prefix: str = "",  # OSS存储的目录前缀
         expires: int = 3600,      # URL有效期（秒），默认1小时
         is_public_bucket: bool = False,  # 是否为公开读Bucket
         bucket=None               # 指定 Bucket 客户端，不传则使用全局客户端
