@@ -10,15 +10,17 @@
 #
 # 首次使用：
 #   cp config/oss_config.example.json config/oss_config.json    # 按需修改分组和 AccessKey
-#   python3 -m pip install -r requirements.txt
 #   chmod +x scripts/mcp_service.sh
 #
+# 启动前会自动准备运行环境：项目虚拟环境不存在时用系统 Python 创建 .venv，
+# 缺依赖时先升级 pip 再安装 requirements.txt，最后启动或重启服务。
+#
 # 可选环境变量：
-#   PYTHON_BIN          指定 Python 解释器（默认优先项目虚拟环境；启动时会校验
-#                       oss2 / mcp / uvicorn，缺失时自动尝试下一个可用解释器。
+#   PYTHON_BIN          指定 Python 解释器（严格模式：必须是 Python 3.10+ 且已安装
+#                       oss2 / mcp / uvicorn，不会自动创建虚拟环境或安装依赖。
 #                       Windows 为 .venv\Scripts\python.exe / venv\Scripts\python.exe，
 #                       其他系统为 .venv/bin/python / venv/bin/python）
-#   OSS_MCP_AUTO_INSTALL 设为 0 可禁止自动为项目虚拟环境安装缺失依赖（默认 1）
+#   OSS_MCP_AUTO_INSTALL 设为 0 可禁止自动创建 .venv、升级 pip 和安装缺失依赖（默认 1）
 #   OSS_MCP_CONFIG      配置文件路径（默认 <项目目录>/config/oss_config.json）
 #   OSS_MCP_HOST        监听地址（默认 127.0.0.1）
 #   OSS_MCP_PORT        监听端口（默认 8000）
@@ -63,7 +65,7 @@ OSS MCP 服务管理脚本
   传输方式  $TRANSPORT
   日志文件  $LOG_FILE
 
-启动前会自动检查 Python 及 oss2 / mcp / uvicorn 依赖；项目虚拟环境缺依赖时会尝试自动安装。
+启动前会自动准备项目虚拟环境：不存在时创建 .venv，缺依赖时先升级 pip 再安装 requirements.txt。
 
 可选环境变量：PYTHON_BIN、OSS_MCP_CONFIG、OSS_MCP_HOST、OSS_MCP_PORT、OSS_MCP_TRANSPORT、
               OSS_MCP_BEARER_TOKEN（监听非本机地址时必填）、OSS_MCP_AUTO_INSTALL（默认 1）
@@ -81,21 +83,18 @@ python_candidates() {
     local project_dir="${1:-$PROJECT_DIR}"
     local platform="${2:-$(detect_platform)}"
     local candidate
-    local -a venv_candidates command_candidates
+    local -a venv_candidates
 
     if [ "$platform" = "windows" ]; then
         venv_candidates=(
             "$project_dir/.venv/Scripts/python.exe"
             "$project_dir/venv/Scripts/python.exe"
         )
-        # Windows 应用商店的 python3 常是无依赖的占位程序，优先使用 python
-        command_candidates=(python python3)
     else
         venv_candidates=(
             "$project_dir/.venv/bin/python"
             "$project_dir/venv/bin/python"
         )
-        command_candidates=(python3 python)
     fi
 
     for candidate in "${venv_candidates[@]}"; do
@@ -103,6 +102,20 @@ python_candidates() {
             printf '%s\n' "$candidate"
         fi
     done
+    system_python_candidates "$platform"
+}
+
+system_python_candidates() {
+    local platform="${1:-$(detect_platform)}"
+    local candidate
+    local -a command_candidates
+
+    if [ "$platform" = "windows" ]; then
+        # Windows 应用商店的 python3 常是无依赖的占位程序，优先使用 python
+        command_candidates=(python python3)
+    else
+        command_candidates=(python3 python)
+    fi
     for candidate in "${command_candidates[@]}"; do
         if command -v "$candidate" >/dev/null 2>&1; then
             command -v "$candidate"
@@ -159,6 +172,39 @@ preferred_venv_python() {
     return 1
 }
 
+python_supports_venv() {
+    local python="${1:-}"
+    [ -n "$python" ] || return 1
+    if [ ! -x "$python" ]; then
+        python="$(command -v "$python" 2>/dev/null || true)"
+    fi
+    [ -n "$python" ] && [ -x "$python" ] || return 1
+    "$python" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1 || return 1
+    "$python" -m venv --help >/dev/null 2>&1
+}
+
+create_project_venv() {
+    local project_dir="${1:-$PROJECT_DIR}"
+    local platform="${2:-$(detect_platform)}"
+    local venv_dir="$project_dir/.venv"
+    local venv_python candidate
+
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        python_supports_venv "$candidate" || continue
+        printf '未找到项目虚拟环境，正在使用 %s 创建 %s ...\n' "$candidate" "$venv_dir" >&2
+        if "$candidate" -m venv "$venv_dir" >&2; then
+            venv_python="$(preferred_venv_python "$project_dir" "$platform" || true)"
+            if [ -n "$venv_python" ]; then
+                printf '%s\n' "$venv_python"
+                return 0
+            fi
+        fi
+        printf '创建虚拟环境失败，继续尝试其他 Python。\n' >&2
+    done < <(system_python_candidates "$platform")
+    return 1
+}
+
 select_python() {
     local project_dir="${1:-$PROJECT_DIR}"
     local platform="${2:-$(detect_platform)}"
@@ -188,6 +234,12 @@ select_python() {
     return 1
 }
 
+upgrade_pip() {
+    local python="$1"
+    printf '正在升级 pip（%s）...\n' "$python" >&2
+    "$python" -m pip install --upgrade pip >&2
+}
+
 install_python_requirements() {
     local python="$1"
     local requirements="${2:-$PROJECT_DIR/requirements.txt}"
@@ -202,23 +254,43 @@ install_python_requirements() {
 ensure_python() {
     local project_dir="${1:-$PROJECT_DIR}"
     local platform="${2:-$(detect_platform)}"
+    local auto_install="${OSS_MCP_AUTO_INSTALL:-1}"
     local python venv_python
 
-    if python="$(select_python "$project_dir" "$platform")"; then
-        printf '%s\n' "$python"
-        return 0
-    fi
+    # PYTHON_BIN 是严格模式：只校验，不创建虚拟环境，也不修改其依赖
     if [ -n "${PYTHON_BIN:-}" ]; then
+        if python="$(select_python "$project_dir" "$platform")"; then
+            printf '%s\n' "$python"
+            return 0
+        fi
         return 1
     fi
 
     venv_python="$(preferred_venv_python "$project_dir" "$platform" || true)"
-    if [ -n "$venv_python" ] && [ "${OSS_MCP_AUTO_INSTALL:-1}" != "0" ]; then
-        if install_python_requirements "$venv_python" "$project_dir/requirements.txt" \
-            && python_has_dependencies "$venv_python"; then
+    if [ -z "$venv_python" ] && [ "$auto_install" != "0" ]; then
+        venv_python="$(create_project_venv "$project_dir" "$platform" || true)"
+    fi
+
+    if [ -n "$venv_python" ]; then
+        if python_has_dependencies "$venv_python"; then
             printf '%s\n' "$venv_python"
             return 0
         fi
+        if [ "$auto_install" != "0" ]; then
+            printf '提示：%s 缺少依赖，正在自动安装。\n' "$venv_python" >&2
+            upgrade_pip "$venv_python" || printf '提示：pip 升级失败，继续安装依赖。\n' >&2
+            if install_python_requirements "$venv_python" "$project_dir/requirements.txt" \
+                && python_has_dependencies "$venv_python"; then
+                printf '%s\n' "$venv_python"
+                return 0
+            fi
+            printf '提示：项目虚拟环境依赖安装后仍不可用，尝试 PATH 中的其他 Python。\n' >&2
+        fi
+    fi
+
+    if python="$(select_python "$project_dir" "$platform")"; then
+        printf '%s\n' "$python"
+        return 0
     fi
     return 1
 }
@@ -328,9 +400,9 @@ start_service() {
     python_bin="$(ensure_python || true)"
     if [ -z "$python_bin" ]; then
         die "未找到依赖齐全的 Python（需要 Python 3.10+ 及 oss2、mcp、uvicorn）。
-  已自动检查项目虚拟环境和 PATH 中的 Python；如仍失败，请安装依赖：
-    \"$PROJECT_DIR/venv/Scripts/python.exe\" -m pip install -r \"$PROJECT_DIR/requirements.txt\"   # Windows
-    \"$PROJECT_DIR/.venv/bin/python\" -m pip install -r \"$PROJECT_DIR/requirements.txt\"           # Linux / macOS
+  已尝试创建 .venv、升级 pip 并安装 requirements.txt，也检查了 PATH 中的 Python。
+  如仍失败，请检查网络后手动执行：
+    \"$PROJECT_DIR/.venv/bin/python\" -m pip install -r \"$PROJECT_DIR/requirements.txt\"
   或通过 PYTHON_BIN 指定已安装依赖的解释器。"
     fi
 

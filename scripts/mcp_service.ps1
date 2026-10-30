@@ -8,15 +8,14 @@
     首次使用：
       1. Copy-Item config\oss_config.example.json config\oss_config.json
       2. 编辑 config\oss_config.json，填写分组、bucket 和 AccessKey
-      3. python -m pip install -r requirements.txt
 
-    启动前会自动检查 Python 及 oss2 / mcp / uvicorn 依赖；项目虚拟环境缺依赖时
-    会尝试自动安装。
+    启动前会自动准备运行环境：项目虚拟环境不存在时用系统 Python 创建 .venv，
+    缺依赖时先升级 pip 再安装 requirements.txt，然后启动或重启服务。
 
     可选环境变量：
       PYTHON_BIN、OSS_MCP_CONFIG、OSS_MCP_HOST、OSS_MCP_PORT、OSS_MCP_TRANSPORT、
       OSS_MCP_BEARER_TOKEN（HTTP/SSE 监听非本机地址时必填）、
-      OSS_MCP_AUTO_INSTALL（设为 0 可禁止自动安装缺失依赖，默认 1）
+      OSS_MCP_AUTO_INSTALL（设为 0 可禁止自动创建 .venv、升级 pip 和安装依赖，默认 1）
 #>
 param(
     [Parameter(Position = 0)]
@@ -52,6 +51,15 @@ function Test-PythonDependencies {
     }
 }
 
+function Get-SystemPythonCandidates {
+    $candidates = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @('python', 'python3')) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd) { $candidates.Add($cmd.Source) }
+    }
+    return @($candidates | Select-Object -Unique)
+}
+
 function Get-PythonCandidates {
     if ($env:PYTHON_BIN) {
         $candidate = $env:PYTHON_BIN
@@ -66,9 +74,8 @@ function Get-PythonCandidates {
         $candidate = Join-Path $ProjectDir $relative
         if (Test-Path $candidate) { $candidates.Add($candidate) }
     }
-    foreach ($name in @('python', 'python3')) {
-        $cmd = Get-Command $name -ErrorAction SilentlyContinue
-        if ($cmd) { $candidates.Add($cmd.Source) }
+    foreach ($candidate in @(Get-SystemPythonCandidates)) {
+        $candidates.Add($candidate)
     }
     return @($candidates | Select-Object -Unique)
 }
@@ -77,6 +84,46 @@ function Get-PreferredVenvPython {
     foreach ($relative in @('.venv\Scripts\python.exe', 'venv\Scripts\python.exe')) {
         $candidate = Join-Path $ProjectDir $relative
         if (Test-Path $candidate) { return $candidate }
+    }
+    return $null
+}
+
+function Test-PythonVenvSupport {
+    param([string]$Python)
+    if (-not $Python -or -not (Test-Path $Python)) { return $false }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" *> $null
+        if ($LASTEXITCODE -ne 0) { return $false }
+        & $Python -m venv --help *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+function New-ProjectVenv {
+    $venvDir = Join-Path $ProjectDir '.venv'
+    $venvPython = Join-Path $venvDir 'Scripts\python.exe'
+    foreach ($candidate in @(Get-SystemPythonCandidates)) {
+        if (-not (Test-PythonVenvSupport $candidate)) { continue }
+        Write-Host "未找到项目虚拟环境，正在使用 $candidate 创建 $venvDir ..." -ForegroundColor Yellow
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $created = $false
+        try {
+            & $candidate -m venv $venvDir 2>&1 | ForEach-Object { Write-Host $_ }
+            $created = ($LASTEXITCODE -eq 0) -and (Test-Path $venvPython)
+        } catch {
+            Write-Host "创建虚拟环境失败：$($_.Exception.Message)" -ForegroundColor Yellow
+        } finally {
+            $ErrorActionPreference = $previous
+        }
+        if ($created) { return $venvPython }
+        Write-Host '创建虚拟环境失败，继续尝试其他 Python。' -ForegroundColor Yellow
     }
     return $null
 }
@@ -93,6 +140,22 @@ function Select-Python {
         }
     }
     return $null
+}
+
+function Update-Pip {
+    param([string]$Python)
+    Write-Host "正在升级 pip（$Python）..." -ForegroundColor Yellow
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Python -m pip install --upgrade pip 2>&1 | ForEach-Object { Write-Host $_ }
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        Write-Host "pip 升级失败：$($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    } finally {
+        $ErrorActionPreference = $previous
+    }
 }
 
 function Install-PythonRequirements {
@@ -113,19 +176,34 @@ function Install-PythonRequirements {
 }
 
 function Ensure-Python {
-    $python = Select-Python
-    if ($python) { return $python }
-    if ($env:PYTHON_BIN) { return $null }
-    if ($env:OSS_MCP_AUTO_INSTALL -eq '0') { return $null }
+    # PYTHON_BIN 是严格模式：只校验，不创建虚拟环境，也不修改其依赖
+    if ($env:PYTHON_BIN) {
+        return (Select-Python)
+    }
+
+    $autoInstall = ($env:OSS_MCP_AUTO_INSTALL -ne '0')
 
     $venvPython = Get-PreferredVenvPython
+    if (-not $venvPython -and $autoInstall) {
+        $venvPython = New-ProjectVenv
+    }
+
     if ($venvPython) {
-        $installed = Install-PythonRequirements $venvPython (Join-Path $ProjectDir 'requirements.txt')
-        if ($installed -and (Test-PythonDependencies $venvPython)) {
-            return $venvPython
+        if (Test-PythonDependencies $venvPython) { return $venvPython }
+        if ($autoInstall) {
+            Write-Host "提示：$venvPython 缺少依赖，正在自动安装。" -ForegroundColor Yellow
+            if (-not (Update-Pip $venvPython)) {
+                Write-Host '提示：pip 升级失败，继续安装依赖。' -ForegroundColor Yellow
+            }
+            $installed = Install-PythonRequirements $venvPython (Join-Path $ProjectDir 'requirements.txt')
+            if ($installed -and (Test-PythonDependencies $venvPython)) {
+                return $venvPython
+            }
+            Write-Host '提示：项目虚拟环境依赖安装后仍不可用，尝试 PATH 中的其他 Python。' -ForegroundColor Yellow
         }
     }
-    return $null
+
+    return (Select-Python)
 }
 
 function Resolve-Python {
@@ -153,7 +231,7 @@ OSS MCP 服务管理脚本（Windows）
   传输方式  $Transport
   日志文件  $LogFile
 
-启动前会自动检查 Python 及 oss2 / mcp / uvicorn 依赖；项目虚拟环境缺依赖时会尝试自动安装。
+启动前会自动准备项目虚拟环境：不存在时创建 .venv，缺依赖时先升级 pip 再安装 requirements.txt。
 
 可选环境变量：PYTHON_BIN、OSS_MCP_CONFIG、OSS_MCP_HOST、OSS_MCP_PORT、OSS_MCP_TRANSPORT、
               OSS_MCP_BEARER_TOKEN（监听非本机地址时必填）、
@@ -238,7 +316,7 @@ function Start-ServiceEx {
 
     $pythonExe = Ensure-Python
     if (-not $pythonExe) {
-        throw "未找到依赖齐全的 Python（需要 Python 3.10+ 及 oss2、mcp、uvicorn）。`n请执行：`n  `"$ProjectDir\venv\Scripts\python.exe`" -m pip install -r `"$ProjectDir\requirements.txt`"`n或通过 PYTHON_BIN 环境变量指定已安装依赖的解释器。"
+        throw "未找到依赖齐全的 Python（需要 Python 3.10+ 及 oss2、mcp、uvicorn）。`n已尝试创建 .venv、升级 pip 并安装 requirements.txt，也检查了 PATH 中的 Python。`n如仍失败，请检查网络后手动执行：`n  `"$ProjectDir\.venv\Scripts\python.exe`" -m pip install -r `"$ProjectDir\requirements.txt`"`n或通过 PYTHON_BIN 环境变量指定已安装依赖的解释器。"
     }
 
     $existingPid = Find-ServiceProcess
@@ -354,38 +432,41 @@ function Show-Logs {
     Get-Content $LogFile -Tail 100 -Wait -Encoding UTF8
 }
 
-try {
-    if ($Transport -notin @('streamable-http', 'sse')) {
-        if ($Transport -eq 'stdio') {
-            throw 'stdio 模式由 MCP 客户端直接拉起，不能作为后台服务运行；请使用 streamable-http 或 sse。'
+# 点加载（. .\mcp_service.ps1）时只定义函数，便于冒烟测试；直接执行时运行命令
+if ($MyInvocation.InvocationName -ne '.') {
+    try {
+        if ($Transport -notin @('streamable-http', 'sse')) {
+            if ($Transport -eq 'stdio') {
+                throw 'stdio 模式由 MCP 客户端直接拉起，不能作为后台服务运行；请使用 streamable-http 或 sse。'
+            }
+            throw "不支持的 transport：$Transport（可选 streamable-http / sse）"
         }
-        throw "不支持的 transport：$Transport（可选 streamable-http / sse）"
-    }
 
-    switch ($Command) {
-        'start' {
-            if (Start-ServiceEx) { exit 0 } else { exit 1 }
+        switch ($Command) {
+            'start' {
+                if (Start-ServiceEx) { exit 0 } else { exit 1 }
+            }
+            'stop' {
+                if (Stop-ServiceEx) { exit 0 } else { exit 1 }
+            }
+            'restart' {
+                if (-not (Stop-ServiceEx)) { exit 1 }
+                if (Start-ServiceEx) { exit 0 } else { exit 1 }
+            }
+            'status' {
+                if (Show-Status) { exit 0 } else { exit 1 }
+            }
+            'logs' {
+                Show-Logs
+                exit 0
+            }
+            default {
+                Show-Usage
+                exit 0
+            }
         }
-        'stop' {
-            if (Stop-ServiceEx) { exit 0 } else { exit 1 }
-        }
-        'restart' {
-            if (-not (Stop-ServiceEx)) { exit 1 }
-            if (Start-ServiceEx) { exit 0 } else { exit 1 }
-        }
-        'status' {
-            if (Show-Status) { exit 0 } else { exit 1 }
-        }
-        'logs' {
-            Show-Logs
-            exit 0
-        }
-        default {
-            Show-Usage
-            exit 0
-        }
+    } catch {
+        Write-Host "错误：$($_.Exception.Message)" -ForegroundColor Red
+        exit 1
     }
-} catch {
-    Write-Host "错误：$($_.Exception.Message)" -ForegroundColor Red
-    exit 1
 }

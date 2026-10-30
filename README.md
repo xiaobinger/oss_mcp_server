@@ -68,7 +68,8 @@ oss_mcp_server/
 │   ├── smoke_http_auth.py         # Bearer Token 校验与强制策略测试
 │   ├── smoke_oss_utils.py         # OSS 操作冒烟测试
 │   ├── smoke_mcp_server.py        # MCP stdio / HTTP 冒烟测试
-│   └── smoke_service_scripts.sh   # 启动脚本解释器与依赖检测测试
+│   ├── smoke_service_scripts.sh   # 启动脚本环境准备与依赖检测测试
+│   └── smoke_service_scripts.ps1  # PowerShell 启动流程编排测试
 ├── requirements.txt
 ├── README.md
 └── .gitignore
@@ -83,7 +84,7 @@ oss_mcp_server/
 | `src/http_auth.py` | Bearer Token 中间件、Token 校验和监听地址安全策略 |
 | `src/oss_mcp_server.py` | 读取配置、解析分组别名、注册 MCP 工具并选择传输方式 |
 | `scripts/` | 进程托管、日志、PID、端口检查，不包含业务逻辑 |
-| `tests/` | 无真实凭证的冒烟测试，覆盖原子操作、HTTP 认证、MCP 协议链路和启动脚本依赖检测 |
+| `tests/` | 无真实凭证的冒烟测试，覆盖原子操作、HTTP 认证、MCP 协议链路和启动脚本环境准备 |
 
 运行时还会自动生成 `logs/`、`run/` 和 Python 的 `__pycache__/`，它们都不会进入 Git。
 
@@ -95,9 +96,19 @@ oss_mcp_server/
 - 能访问阿里云 OSS 的网络环境
 - 具备目标 Bucket 读写权限的 AccessKey，或 STS 临时凭证
 
-### 2. 安装依赖
+### 2. 准备运行环境
 
-在项目根目录执行：
+推荐直接使用服务管理脚本，`start` / `restart` 前会自动完成：
+
+1. 检测项目虚拟环境 `.venv` 或 `venv`；
+2. 都不存在时，用 PATH 中的 Python 3.10+ 创建 `.venv`；
+3. 升级该虚拟环境的 pip；
+4. 检测 `oss2` / `mcp` / `uvicorn`，缺失时执行 `pip install -r requirements.txt`；
+5. 依赖齐全后启动服务。
+
+依赖已经齐全时不会重复执行 pip，正常启动不会额外访问网络。设置 `OSS_MCP_AUTO_INSTALL=0` 可关闭创建虚拟环境、升级 pip 和安装依赖；`PYTHON_BIN` 为严格模式，只使用指定解释器，不会修改环境。
+
+也可以手动安装：
 
 ```bash
 python -m venv .venv
@@ -111,9 +122,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-如果使用 PyCharm / IDEA 打开项目，IDE 可能会自动创建一个只有 `pip` 的空 `venv`。请确认该解释器已执行 `python -m pip install -r requirements.txt`，否则直接运行会报 `ModuleNotFoundError: No module named 'oss2'` 或 `'mcp'`。
-
-服务脚本启动前会自动检查 Python 版本与 `oss2` / `mcp` / `uvicorn` 依赖：优先使用项目虚拟环境，缺依赖时自动尝试其他可用解释器；如果项目虚拟环境存在但依赖为空，会自动执行 `pip install -r requirements.txt`。设置 `OSS_MCP_AUTO_INSTALL=0` 可关闭自动安装。也可以用 `PYTHON_BIN` 显式指定解释器。
+如果使用 PyCharm / IDEA 打开项目，IDE 可能会自动创建一个只有 `pip` 的空 `venv`。启动脚本会检测到缺失依赖并自动补装；若关闭了自动安装，请手动对该解释器执行 `python -m pip install -r requirements.txt`，否则会报 `ModuleNotFoundError: No module named 'oss2'` 或 `'mcp'`。
 
 ### 3. 准备配置
 
@@ -517,15 +526,15 @@ chmod +x scripts/mcp_service.sh
 - 传输方式：`streamable-http`
 - 端点：`/mcp`
 
-启动前会检查服务脚本、配置文件、Python 版本和依赖；端口被占用时会拒绝启动；最多等待 20 秒确认端口就绪。
+`start` / `restart` 前会按以下顺序准备运行环境，并逐个验证是否为 Python 3.10+ 且能导入 `oss2` / `mcp` / `uvicorn`：
 
-解释器按以下顺序探测，并逐个验证是否为 Python 3.10+ 且能导入 `oss2` / `mcp` / `uvicorn`：
+1. `PYTHON_BIN`：严格模式，必须可用，不会自动创建环境、升级 pip 或安装依赖，也不会回退；
+2. 项目虚拟环境：Windows 为 `.venv\Scripts\python.exe`、`venv\Scripts\python.exe`，其他系统为 `.venv/bin/python`、`venv/bin/python`；
+3. 找不到可用项目虚拟环境时，若允许自动安装，用 PATH 中的 Python 创建 `.venv`（Windows 优先 `python`，避免应用商店的 `python3` 占位程序）；
+4. 虚拟环境缺依赖时，先执行 `pip install --upgrade pip`，再执行 `pip install -r requirements.txt`，然后重试；
+5. 项目虚拟环境仍不可用时，回退到 PATH 中依赖齐全的 Python。
 
-1. `PYTHON_BIN`（显式指定时必须可用，不会回退）
-2. 项目虚拟环境：Windows 为 `.venv\Scripts\python.exe`、`venv\Scripts\python.exe`，其他系统为 `.venv/bin/python`、`venv/bin/python`
-3. PATH 中的 `python`（Windows 优先，避免应用商店的 `python3` 占位程序）或 `python3`
-
-若项目虚拟环境存在但依赖缺失，脚本会自动执行 `pip install -r requirements.txt` 后重试；设置 `OSS_MCP_AUTO_INSTALL=0` 可关闭该行为。
+健康环境会直接使用，不会重复升级 pip 或安装依赖；pip 升级失败时只提示并继续安装依赖，不会直接中断启动。设置 `OSS_MCP_AUTO_INSTALL=0` 可关闭自动创建 `.venv`、升级 pip 和安装依赖。环境准备完成后会检查服务脚本、配置文件和端口占用，并最多等待 20 秒确认端口就绪。
 
 ### Windows
 
@@ -548,14 +557,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\mcp_service.ps1 start
 powershell -ExecutionPolicy Bypass -File .\scripts\mcp_service.ps1 status
 ```
 
-Windows 脚本使用隐藏窗口的 `Start-Process` 托管进程，并设置 `PYTHONIOENCODING=utf-8` 避免日志乱码。每次启动会把旧的 `mcp.log`、`mcp.out.log` 轮转为 `.prev`，避免日志无限增长。
+Windows 脚本使用隐藏窗口的 `Start-Process` 托管进程，并设置 `PYTHONIOENCODING=utf-8` 避免日志乱码。每次启动会把旧的 `mcp.log`、`mcp.out.log` 轮转为 `.prev`，避免日志无限增长。虚拟环境创建、pip 升级和依赖安装流程与 Linux 脚本一致，新建的虚拟环境同样位于项目根目录的 `.venv`。
 
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `PYTHON_BIN` | 自动探测 | 指定 Python 解释器（绝对路径或命令名，如 `python`）；必须为 3.10+ 且已安装依赖，否则直接报错，不回退 |
-| `OSS_MCP_AUTO_INSTALL` | `1` | 项目虚拟环境缺依赖时自动执行 `pip install -r requirements.txt`；设为 `0` 关闭 |
+| `PYTHON_BIN` | 自动探测 | 严格指定 Python 解释器（绝对路径或命令名，如 `python`）；必须为 3.10+ 且已安装依赖，否则直接报错，不会创建虚拟环境或安装依赖 |
+| `OSS_MCP_AUTO_INSTALL` | `1` | 自动创建 `.venv`、升级 pip 并安装 `requirements.txt`；设为 `0` 时只使用现有可用环境，不创建、不升级、不安装 |
 | `OSS_MCP_CONFIG` | `config/oss_config.json` | 配置文件路径 |
 | `OSS_MCP_HOST` | `127.0.0.1` | 监听地址 |
 | `OSS_MCP_PORT` | `8000` | 监听端口 |
@@ -680,7 +689,7 @@ bash tests/smoke_service_scripts.sh
 - Bearer Token 缺失/错误返回 401，正确 Token 可完成 MCP 会话；
 - Token 强度、来源优先级、本机免 Token 和非本机强制 Token 策略；
 - 认证日志不会泄露 Token；
-- 启动脚本的 Windows / POSIX 虚拟环境路径识别、解释器依赖检测、缺依赖回退与自动安装；
+- 启动脚本的 Windows / POSIX 虚拟环境路径识别、自动创建 `.venv`、pip 升级与依赖安装顺序、健康环境跳过 pip、`PYTHON_BIN` 严格模式、缺依赖回退，以及 PowerShell / Bash 流程一致性；
 - 本地上传、URL 上传、ACL 请求头、非法 ACL 拒绝；
 - 替换文件：保留原名、按本地文件名改名、原对象不存在、改名目标重名、删除旧对象失败；
 - 单文件下载、多文件 ZIP、目录 ZIP、空目录报错；
@@ -698,8 +707,8 @@ bash tests/smoke_service_scripts.sh
 | 现象 | 处理方式 |
 | --- | --- |
 | `未找到配置文件` | 复制模板：`cp config/oss_config.example.json config/oss_config.json`，Windows 使用 `Copy-Item` |
-| `ModuleNotFoundError: No module named 'oss2' / 'mcp'` | IDE 选中的虚拟环境没有安装依赖；对同一个解释器执行 `python -m pip install -r requirements.txt`，或直接使用启动脚本（会自动检测并安装到项目 venv） |
-| `当前 Python 缺少依赖` / `未找到依赖齐全的 Python` | 启动脚本已自动检查项目 venv 和 PATH；按提示对脚本选中的解释器安装 `requirements.txt`，或用 `PYTHON_BIN` 指定已安装依赖的 Python |
+| `ModuleNotFoundError: No module named 'oss2' / 'mcp'` | IDE 选中的虚拟环境没有安装依赖；直接使用启动脚本（会检测并安装到项目 venv），或对同一个解释器执行 `python -m pip install -r requirements.txt` |
+| `当前 Python 缺少依赖` / `未找到依赖齐全的 Python` | 脚本已尝试创建 `.venv`、升级 pip 并安装 `requirements.txt`，也检查了 PATH；请确认能访问 PyPI，或按提示手动安装后用 `PYTHON_BIN` 指定解释器 |
 | 脚本选中了应用商店的 `python3` | 在 Windows 上优先使用 `python`；也可用 `PYTHON_BIN` 指向项目 `venv\Scripts\python.exe` |
 | `端口 8000 已被其他进程占用` | 停止占用进程，或设置 `OSS_MCP_PORT=8010` 后重启 |
 | 启动后端口 20 秒未就绪 | 执行 `scripts/mcp_service.sh logs`（Windows 使用 `.bat logs`）查看异常 |
@@ -734,6 +743,6 @@ bash tests/smoke_service_scripts.sh
 - `replace_file` 改名模式由“上传新对象 + 删除旧对象”两步完成，不是跨对象原子操作；删除失败时新旧对象会同时存在，并返回明确错误。
 - `replace_file` 不传 `acl` 时，新对象继承 Bucket ACL，不会自动沿用被替换对象的 ACL；替换公共读文件时请显式传 `acl=public-read`。
 - HTTP 模式使用单个静态 Bearer Token，不区分用户、不提供按工具授权、用量限流或 Token 自动轮换。
-- 启动脚本自动安装依赖需要可访问 PyPI；离线环境请先手动安装 `requirements.txt`，或设置 `OSS_MCP_AUTO_INSTALL=0` 后自行管理环境。
+- 启动脚本自动创建虚拟环境和安装依赖需要可访问 PyPI；Debian / Ubuntu 的系统 Python 还需要 `python3-venv`（`sudo apt install python3-venv`）。离线环境请先手动安装 `requirements.txt`，或设置 `OSS_MCP_AUTO_INSTALL=0` 后自行管理环境。
 - `file_exists` 只做精确对象匹配；判断“目录是否存在”需要按前缀列出对象，本工具不提供该语义。
 - 冒烟测试使用假 Bucket，不能替代真实 OSS 的权限和网络联调。
