@@ -12,7 +12,7 @@
       "endpoint": "oss-cn-hangzhou.aliyuncs.com",
       "bucket": "prod-bucket",
       "domain": "https://static.example.com",
-      "default_prefix": "lstd/pay/",
+      "default_prefix": "",
       "public_read": true
     },
     "test": {
@@ -171,7 +171,7 @@ def _build_group(name, raw):
         "endpoint": endpoint,
         "bucket": bucket_name,
         "domain": _normalize_domain(domain) if domain else None,
-        "prefix": _pick(raw, "default_prefix", "defaultPrefix", "prefix") or "lstd/pay/",
+        "prefix": _pick(raw, "default_prefix", "defaultPrefix", "prefix") or "",
         "public_read": bool(raw.get("public_read", raw.get("publicRead", False))),
     }
     bucket = oss_utils.createBucketClient({
@@ -348,7 +348,7 @@ def list_groups() -> dict:
 def file_exists(object_name: str, group: Optional[str] = None) -> dict:
     """判断 OSS 上的文件（对象）是否存在，仅精确匹配传入的对象路径。
 
-    :param object_name: OSS 对象路径，如 lstd/pay/a.png
+    :param object_name: OSS 对象路径，如 a.png
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
     """
     config, bucket = _resolve_group(group)
@@ -374,7 +374,7 @@ def upload_file(
     """上传本地文件到 OSS。
 
     :param local_path: 本地文件路径（绝对路径或相对当前工作目录）
-    :param object_name: OSS 对象路径，如 lstd/pay/a.png
+    :param object_name: OSS 对象路径，如 a.png
     :param acl: 对象 ACL：default/private/public-read/public-read-write，不传则继承 Bucket
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
     """
@@ -404,7 +404,7 @@ def upload_from_url(
     """从网络地址下载文件并上传到 OSS。
 
     :param url: 源文件网络地址
-    :param object_name: OSS 对象路径，如 lstd/pay/a.png
+    :param object_name: OSS 对象路径，如 a.png
     :param acl: 对象 ACL：default/private/public-read/public-read-write，不传则继承 Bucket
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
     """
@@ -436,7 +436,7 @@ def replace_file(
     放到原对象所在目录，新文件上传成功后再删除旧对象。原对象不存在或改名目标已存在时拒绝执行。
 
     :param local_path: 新内容的本地文件路径
-    :param object_name: 被替换的 OSS 对象路径，如 lstd/pay/a.png
+    :param object_name: 被替换的 OSS 对象路径，如 a.png
     :param keep_original_name: 是否保留原对象路径，默认 true；false 时按本地文件名改名并删除旧对象
     :param acl: 新对象 ACL：default/private/public-read/public-read-write，不传则继承 Bucket
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
@@ -470,7 +470,7 @@ def download_file(
 ) -> dict:
     """下载单个文件到本地。
 
-    :param object_name: OSS 对象路径，如 lstd/pay/a.png
+    :param object_name: OSS 对象路径，如 a.png
     :param local_path: 本地保存路径或目录；不传时保存为当前目录下的文件名
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
     """
@@ -524,7 +524,7 @@ def download_folder(
 ) -> dict:
     """下载整个目录（按 OSS 前缀匹配）并打包为 zip，压缩包内保留目录内相对路径。
 
-    :param prefix: OSS 目录前缀，如 lstd/pay/2026/
+    :param prefix: OSS 目录前缀，如 2026/
     :param local_dir: zip 文件存放目录，默认当前目录
     :param zip_name: zip 文件名或路径，不传时自动生成
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
@@ -545,7 +545,7 @@ def download_folder(
 def delete_file(object_name: str, group: Optional[str] = None) -> dict:
     """删除单个 OSS 文件（不可恢复，请谨慎调用）。
 
-    :param object_name: OSS 对象路径，如 lstd/pay/a.png
+    :param object_name: OSS 对象路径，如 a.png
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
     """
     config, bucket = _resolve_group(group)
@@ -580,7 +580,7 @@ def get_file_url(
     """获取 OSS 文件的可访问地址。
 
     :param relative_path: 相对路径，如 user/avatar.jpg
-    :param prefix: OSS 存储目录前缀，不传则使用分组配置的 default_prefix（默认 lstd/pay/）
+    :param prefix: OSS 存储目录前缀，不传则使用分组配置的 default_prefix（默认 ）
     :param expires: 私有 Bucket 签名 URL 有效期（秒），默认 3600
     :param public: 是否公共读；不传则使用分组配置的 public_read。
                    公共读且分组配置了 domain 时优先使用 domain 拼接地址
@@ -625,8 +625,8 @@ def _build_parser():
                         help="单分组模式：Bucket 名称")
     parser.add_argument("--domain", default=os.environ.get("OSS_DOMAIN"),
                         help="单分组模式：文件访问域名（可选，公共读时优先使用）")
-    parser.add_argument("--default-prefix", default=os.environ.get("OSS_DEFAULT_PREFIX", "lstd/pay/"),
-                        help="单分组模式：生成 URL 时的默认前缀，默认 lstd/pay/")
+    parser.add_argument("--default-prefix", default=os.environ.get("OSS_DEFAULT_PREFIX", ""),
+                        help="单分组模式：生成 URL 时的默认前缀，默认 ")
     parser.add_argument("--public-read", action="store_true",
                         default=os.environ.get("OSS_PUBLIC_READ", "").lower() in ("1", "true", "yes"),
                         help="单分组模式：Bucket 是否公共读")
