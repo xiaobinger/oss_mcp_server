@@ -168,6 +168,110 @@ deleted = oss_utils.deleteFiles(list(fake.objects) + ["k/0"])
 assert fake.batch_sizes == [1000, 1000, 500], fake.batch_sizes
 assert len(deleted) == 2500, len(deleted)
 
+# 8.1 替换文件：保留原对象名，内容更新、路径不变
+fake.objects = {"lstd/pay/replace.txt": b"old"}
+replace_source = os.path.join(tmp, "replacement.txt")
+with open(replace_source, "wb") as f:
+    f.write(b"new")
+before_deletes = list(fake.delete_calls)
+result = oss_utils.replaceFile(replace_source, "lstd/pay/replace.txt")
+assert result == {
+    "old_object_name": "lstd/pay/replace.txt",
+    "new_object_name": "lstd/pay/replace.txt",
+    "renamed": False,
+    "old_deleted": False,
+}, result
+assert fake.objects["lstd/pay/replace.txt"] == b"new"
+assert fake.delete_calls == before_deletes
+print("replace keep name ok:", result)
+
+# 8.2 替换文件：不保留原名，按本地文件名放到原目录并删除旧对象
+fake.objects = {"lstd/pay/original.txt": b"old"}
+rename_source = os.path.join(tmp, "renamed.txt")
+with open(rename_source, "wb") as f:
+    f.write(b"renamed")
+before_deletes = list(fake.delete_calls)
+result = oss_utils.replaceFile(rename_source, "lstd/pay/original.txt", keep_original_name=False)
+assert result == {
+    "old_object_name": "lstd/pay/original.txt",
+    "new_object_name": "lstd/pay/renamed.txt",
+    "renamed": True,
+    "old_deleted": True,
+}, result
+assert "lstd/pay/original.txt" not in fake.objects
+assert fake.objects["lstd/pay/renamed.txt"] == b"renamed"
+assert fake.delete_calls == before_deletes + ["lstd/pay/original.txt"]
+print("replace rename ok:", result)
+
+# 8.3 替换文件：原对象不存在时拒绝，避免路径写错变成新建
+fake.objects = {"lstd/pay/exists.txt": b"old"}
+puts_before = len(fake.put_calls)
+before_deletes = list(fake.delete_calls)
+try:
+    oss_utils.replaceFile(replace_source, "lstd/pay/missing.txt")
+    raise AssertionError("should reject missing original object")
+except ValueError as exc:
+    print("replace missing original ok:", exc)
+assert len(fake.put_calls) == puts_before
+assert fake.delete_calls == before_deletes
+
+# 8.4 替换文件：改名目标已存在时拒绝，避免覆盖第三方文件
+fake.objects = {"lstd/pay/a.txt": b"old-a", "lstd/pay/collision.txt": b"keep-collision"}
+collision_source = os.path.join(tmp, "collision.txt")
+with open(collision_source, "wb") as f:
+    f.write(b"new")
+puts_before = len(fake.put_calls)
+try:
+    oss_utils.replaceFile(collision_source, "lstd/pay/a.txt", keep_original_name=False)
+    raise AssertionError("should reject existing rename target")
+except ValueError as exc:
+    print("replace collision ok:", exc)
+assert fake.objects["lstd/pay/a.txt"] == b"old-a"
+assert fake.objects["lstd/pay/collision.txt"] == b"keep-collision"
+assert len(fake.put_calls) == puts_before
+
+# 8.5 替换文件：空路径 / 目录前缀 / 本地文件不存在时拒绝
+for bad_key in ("", "lstd/pay/"):
+    try:
+        oss_utils.replaceFile(replace_source, bad_key)
+        raise AssertionError(f"should reject invalid object name: {bad_key!r}")
+    except ValueError as exc:
+        print("replace invalid key ok:", exc)
+try:
+    oss_utils.replaceFile(os.path.join(tmp, "no-such-file.txt"), "lstd/pay/exists.txt")
+    raise AssertionError("should reject missing local file")
+except FileNotFoundError as exc:
+    print("replace missing local ok:", exc)
+
+# 8.6 替换文件：ACL 请求头生效，非法 ACL 在上传前拒绝
+fake.objects = {"lstd/pay/acl.txt": b"old"}
+oss_utils.replaceFile(replace_source, "lstd/pay/acl.txt", acl="public-read")
+assert fake.put_calls[-1] == ("lstd/pay/acl.txt", {"x-oss-object-acl": "public-read"})
+puts_before = len(fake.put_calls)
+try:
+    oss_utils.replaceFile(replace_source, "lstd/pay/acl.txt", acl="world-writable")
+    raise AssertionError("should reject invalid acl")
+except ValueError as exc:
+    print("replace invalid acl ok:", exc)
+assert len(fake.put_calls) == puts_before
+assert fake.objects["lstd/pay/acl.txt"] == b"new"
+
+# 8.7 替换文件：改名后删除旧对象失败时，明确报告新对象已上传
+class DeleteFailBucket(FakeBucket):
+    def delete_object(self, key, params=None, headers=None):
+        raise OSError("delete denied")
+
+delete_fail_bucket = DeleteFailBucket()
+delete_fail_bucket.objects = {"lstd/pay/old.txt": b"old"}
+try:
+    oss_utils.replaceFile(collision_source, "lstd/pay/old.txt", keep_original_name=False, bucket=delete_fail_bucket)
+    raise AssertionError("should report delete failure")
+except ValueError as exc:
+    print("replace delete failure ok:", exc)
+    assert "已上传" in str(exc) and "删除旧对象" in str(exc), exc
+assert delete_fail_bucket.objects["lstd/pay/collision.txt"] == b"new"
+assert delete_fail_bucket.objects["lstd/pay/old.txt"] == b"old"
+
 # 9. URL 生成
 oss_utils.bucketClient = fake
 public_url = oss_utils.get_oss_image_url("a.png", prefix="lstd/pay/", is_public_bucket=True)
@@ -192,6 +296,22 @@ rc = run_cli(base + ["download", "--key", "lstd/pay/cli.txt", "--zip-name", "sin
 assert rc == 0 and os.path.exists(os.path.join(out_dir, "single.zip"))
 rc = run_cli(base + ["delete", "--key", "lstd/pay/cli.txt", "--key", "missing-key"])
 assert rc == 0
+
+# 10.1 CLI：replace 默认保留原名；--use-local-name 改名并删除旧对象
+local_replace = os.path.join(tmp, "cli-replace-new.txt")
+with open(local_replace, "wb") as f:
+    f.write(b"cli-replaced")
+fake.objects = {"lstd/pay/cli-replace.txt": b"old"}
+rc = run_cli(base + ["replace", "--file", local_replace, "--key", "lstd/pay/cli-replace.txt"])
+assert rc == 0 and fake.objects["lstd/pay/cli-replace.txt"] == b"cli-replaced"
+fake.objects = {"lstd/pay/cli-old.txt": b"old"}
+rc = run_cli(base + ["replace", "--file", local_replace, "--key", "lstd/pay/cli-old.txt", "--use-local-name"])
+assert rc == 0
+assert "lstd/pay/cli-old.txt" not in fake.objects
+assert fake.objects["lstd/pay/cli-replace-new.txt"] == b"cli-replaced"
+# 原对象不存在 -> 非零退出
+rc = run_cli(base + ["replace", "--file", local_replace, "--key", "lstd/pay/nope.txt"])
+assert rc == 1
 
 # 11. 缺少认证参数 -> SystemExit
 try:

@@ -1,5 +1,6 @@
 import argparse
 import os
+import posixpath
 import re
 import shutil
 import sys
@@ -108,6 +109,57 @@ def uploadLocalFile(local_path, object_name, acl=None, bucket=None):
 
     _log(f'文件已成功上传到OSS，OSS路径为：{object_name}')
     return object_name
+
+
+def replaceFile(local_path, object_name, keep_original_name=True, acl=None, bucket=None):
+    """用本地文件替换 OSS 上已有的对象
+    :param local_path: 新内容的本地文件路径
+    :param object_name: 被替换的 OSS 对象路径
+    :param keep_original_name: True 保留原对象路径；False 使用本地文件名放到原目录，并删除旧对象
+    :param acl: 新对象 ACL（default/private/public-read/public-read-write），None 表示继承 Bucket
+    :param bucket: 指定 Bucket 客户端，不传则使用全局客户端
+    :return: 替换结果，包含新旧对象路径与是否改名、是否删除旧对象
+    """
+    bucket_client = bucket or _require_bucket()
+    if not object_name or not object_name.strip():
+        raise ValueError("对象路径不能为空")
+    if object_name.endswith('/'):
+        raise ValueError("对象路径不能以 / 结尾（这是目录前缀，不是文件）")
+    if not os.path.isfile(local_path):
+        raise FileNotFoundError(f"本地文件不存在：{local_path}")
+
+    headers = _build_acl_headers(acl)
+    if not bucket_client.object_exists(object_name):
+        raise ValueError(f"待替换的 OSS 对象不存在：{object_name}，如需新建请使用上传功能")
+
+    new_object_name = object_name
+    if not keep_original_name:
+        directory = posixpath.dirname(object_name)
+        new_object_name = posixpath.join(directory, os.path.basename(local_path)) if directory else os.path.basename(local_path)
+        if new_object_name != object_name and bucket_client.object_exists(new_object_name):
+            raise ValueError(f"目标对象已存在，拒绝覆盖：{new_object_name}，请更换本地文件名或先删除目标对象")
+
+    with open(local_path, "rb") as file_obj:
+        bucket_client.put_object(new_object_name, file_obj, headers=headers)
+
+    renamed = new_object_name != object_name
+    old_deleted = False
+    if renamed:
+        try:
+            bucket_client.delete_object(object_name)
+        except Exception as exc:
+            raise ValueError(
+                f"新文件已上传到 {new_object_name}，但删除旧对象 {object_name} 失败：{exc}"
+            ) from exc
+        old_deleted = True
+
+    _log(f'文件已替换：{object_name} -> {new_object_name}')
+    return {
+        "old_object_name": object_name,
+        "new_object_name": new_object_name,
+        "renamed": renamed,
+        "old_deleted": old_deleted,
+    }
 
 
 def get_oss_image_url(
@@ -310,13 +362,15 @@ def _sanitize_filename(name):
 def _build_parser():
     parser = argparse.ArgumentParser(
         prog="oss_utils.py",
-        description="阿里云 OSS 工具：上传、下载（多文件/目录自动打包 zip）、删除、获取访问地址",
+        description="阿里云 OSS 工具：上传、替换、下载（多文件/目录自动打包 zip）、删除、获取访问地址",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "示例：\n"
             "  python src/oss_utils.py --access-key-id AK --access-key-secret SK "
             "--endpoint oss-cn-hangzhou.aliyuncs.com --bucket demo "
             "upload --file ./a.png --key lstd/pay/a.png --acl public-read\n"
+            "  python src/oss_utils.py ... replace --file ./new.png --key lstd/pay/a.png\n"
+            "  python src/oss_utils.py ... replace --file ./new.png --key lstd/pay/a.png --use-local-name\n"
             "  python src/oss_utils.py ... download --key lstd/pay/a.png --key lstd/pay/b.png -d ./downloads\n"
             "  python src/oss_utils.py ... download --prefix lstd/pay/2026/ -d ./downloads\n"
             "  python src/oss_utils.py ... delete --key lstd/pay/a.png --key lstd/pay/b.png\n"
@@ -344,6 +398,13 @@ def _build_parser():
     source.add_argument("--url", help="网络文件地址")
     upload.add_argument("--key", required=True, help="OSS 对象路径，如 lstd/pay/a.png")
     upload.add_argument("--acl", choices=list(ACL_MAP), help="对象 ACL 权限，默认继承 Bucket")
+
+    replace = subparsers.add_parser("replace", help="用本地文件替换 OSS 上已有文件，默认保留原对象路径")
+    replace.add_argument("--file", required=True, help="新内容的本地文件路径")
+    replace.add_argument("--key", required=True, help="被替换的 OSS 对象路径")
+    replace.add_argument("--use-local-name", action="store_true",
+                         help="使用本地文件名放到原对象所在目录，成功后删除旧对象；默认保留原对象路径")
+    replace.add_argument("--acl", choices=list(ACL_MAP), help="新对象 ACL 权限，默认继承 Bucket")
 
     download = subparsers.add_parser("download", help="下载文件；多文件或整个目录自动打包为 zip")
     download_source = download.add_mutually_exclusive_group()
@@ -392,6 +453,13 @@ def main(argv=None):
                 uploadLocalFile(args.file, args.key, acl=args.acl)
             else:
                 uploadFile(args.url, args.key, acl=args.acl)
+        elif args.command == "replace":
+            replaceFile(
+                args.file,
+                args.key,
+                keep_original_name=not args.use_local_name,
+                acl=args.acl,
+            )
         elif args.command == "download":
             if args.prefix:
                 downloadFolder(args.prefix, local_dir=args.dir, zip_name=args.zip_name)

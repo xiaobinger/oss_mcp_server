@@ -72,7 +72,8 @@ mcp = FastMCP(
     instructions=(
         "阿里云 OSS 工具，支持多组 AccessKey 认证配置。调用工具时可通过 group 参数指定认证分组，"
         "不传则使用默认分组；可用 list_groups 查看已配置的分组（不会返回 Secret）。"
-        "支持：判断文件是否存在；上传本地文件或网络文件（可指定对象 ACL）；下载单文件、多文件或整个目录"
+        "支持：判断文件是否存在；上传本地文件或网络文件（可指定对象 ACL）；替换已有文件"
+        "（默认保留原对象路径，也可按本地文件名改名）；下载单文件、多文件或整个目录"
         "（多文件/目录自动打包为 zip）；删除单个或批量删除文件；获取文件访问地址。"
     ),
 )
@@ -416,6 +417,46 @@ def upload_from_url(
         "object_name": object_name,
         "acl": acl or "default",
         "source_url": url,
+    }
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True),
+)
+def replace_file(
+    local_path: str,
+    object_name: str,
+    keep_original_name: bool = True,
+    acl: Optional[str] = None,
+    group: Optional[str] = None,
+) -> dict:
+    """用本地文件替换 OSS 上已存在的文件。
+
+    默认保留原对象路径，内容替换后访问地址不变；keep_original_name=false 时使用本地文件名
+    放到原对象所在目录，新文件上传成功后再删除旧对象。原对象不存在或改名目标已存在时拒绝执行。
+
+    :param local_path: 新内容的本地文件路径
+    :param object_name: 被替换的 OSS 对象路径，如 lstd/pay/a.png
+    :param keep_original_name: 是否保留原对象路径，默认 true；false 时按本地文件名改名并删除旧对象
+    :param acl: 新对象 ACL：default/private/public-read/public-read-write，不传则继承 Bucket
+    :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
+    """
+    config, bucket = _resolve_group(group)
+    result = _execute(
+        oss_utils.replaceFile,
+        local_path,
+        object_name,
+        keep_original_name=keep_original_name,
+        acl=acl,
+        bucket=bucket,
+    )
+    return {
+        "group": config["name"],
+        "group_alias": config["alias"],
+        "bucket": config["bucket"],
+        **result,
+        "acl": acl or "default",
+        "size": os.path.getsize(local_path),
     }
 
 

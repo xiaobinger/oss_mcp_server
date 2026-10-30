@@ -4,7 +4,7 @@
 
 **把阿里云 OSS 变成 AI 可以直接调用的文件工具集**
 
-上传 · 下载 · 目录打包 · 删除 · 访问地址 · 多分组认证 · 跨平台托管
+上传 · 替换 · 下载 · 目录打包 · 删除 · 访问地址 · 多分组认证 · 跨平台托管
 
 <p>
   <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+">
@@ -40,6 +40,7 @@
 
 - **文件存在性判断**：基于 OSS HEAD 请求精确判断对象是否存在，不把目录前缀误判为文件。
 - **上传**：支持本地文件和网络 URL，上传时可指定对象 ACL（`private` / `public-read` / `public-read-write` / `default`）。
+- **替换**：用本地文件替换 OSS 上已有对象；默认保留原对象路径（URL 不变），也可按本地文件名改名并删除旧对象。
 - **下载**：支持单文件、多文件和整个目录；多文件与目录自动打包为 ZIP，避免大量小文件逐个落盘。
 - **删除**：支持单个删除和批量删除；批量删除自动去重，并按 OSS 限制每 1000 个一批提交。
 - **访问地址**：公共读 Bucket 可使用自定义域名直链；私有 Bucket 自动生成带有效期的签名 URL。
@@ -61,7 +62,7 @@ oss_mcp_server/
 │   └── mcp_service.bat            # Windows 双击 / CMD 入口
 ├── src/
 │   ├── http_auth.py               # HTTP Bearer Token 中间件与启动策略
-│   ├── oss_mcp_server.py          # MCP 服务层：配置、分组路由、10 个工具
+│   ├── oss_mcp_server.py          # MCP 服务层：配置、分组路由、11 个工具
 │   └── oss_utils.py               # OSS 原子操作层 + 命令行入口
 ├── tests/
 │   ├── smoke_http_auth.py         # Bearer Token 校验与强制策略测试
@@ -252,7 +253,7 @@ python src/oss_mcp_server.py \
 
 ## MCP 工具
 
-服务共暴露 10 个工具。除 `list_groups` 外，其余工具都接受可选的 `group` 参数，传分组名称或别名均可。
+服务共暴露 11 个工具。除 `list_groups` 外，其余工具都接受可选的 `group` 参数，传分组名称或别名均可。
 
 | 工具 | 功能 | 主要参数 | 属性 |
 | --- | --- | --- | --- |
@@ -260,6 +261,7 @@ python src/oss_mcp_server.py \
 | `file_exists` | 精确判断对象是否存在 | `object_name`、`group` | 只读 |
 | `upload_file` | 上传本地文件 | `local_path`、`object_name`、`acl`、`group` | 写 |
 | `upload_from_url` | 下载网络文件并上传 | `url`、`object_name`、`acl`、`group` | 写、联网 |
+| `replace_file` | 用本地文件替换已有对象，可保留原名或按本地文件名改名 | `local_path`、`object_name`、`keep_original_name`、`acl`、`group` | 写、可能删除旧对象 |
 | `download_file` | 下载单个对象到本地 | `object_name`、`local_path`、`group` | 写本地 |
 | `download_files` | 下载多个对象并打包 ZIP，保留完整对象路径 | `object_names`、`local_dir`、`zip_name`、`group` | 写本地 |
 | `download_folder` | 按前缀下载整个目录并打包 ZIP，保留相对路径 | `prefix`、`local_dir`、`zip_name`、`group` | 写本地 |
@@ -270,6 +272,7 @@ python src/oss_mcp_server.py \
 ### 参数补充
 
 - **`acl`**：可选 `default`、`private`、`public-read`、`public-read-write`。不传时继承 Bucket 的 ACL。
+- **`keep_original_name`**：仅 `replace_file` 使用。默认 `true`，表示覆盖原对象内容、对象路径和 URL 不变；设为 `false` 时使用本地文件名放到原对象所在目录，上传成功后删除旧对象。
 - **`local_path`**：可以是文件路径，也可以是已存在的目录；传入目录时保留 OSS 文件名。不传时保存到当前工作目录。
 - **`local_dir`**：ZIP 的存放目录，默认当前工作目录。
 - **`zip_name`**：ZIP 文件名或路径。不传时自动生成，例如 `prod-bucket_download_20261029_153000.zip`。
@@ -290,7 +293,15 @@ python src/oss_mcp_server.py \
 }
 ```
 
-下载类工具返回本地绝对路径和大小；批量删除返回实际删除的对象列表。`delete_file` 与 `delete_files` 带有 destructive 注解，支持该能力的客户端通常会请求二次确认。
+下载类工具返回本地绝对路径和大小；批量删除返回实际删除的对象列表。`replace_file` 返回 `old_object_name`、`new_object_name`、`renamed`、`old_deleted`，便于确认是否改名以及旧对象是否已删除。`delete_file`、`delete_files` 与 `replace_file` 带有 destructive 注解，支持该能力的客户端通常会请求二次确认。
+
+### 替换规则
+
+- 原对象必须存在；不存在会拒绝执行，避免对象路径写错时静默变成新建。
+- 保留原名：直接 `PutObject` 覆盖原对象内容，对象 ACL 由 `acl` 参数决定，不传则继承 Bucket。
+- 改名：新对象路径为“原对象所在目录 + 本地文件名”；如果该路径已存在其他对象，直接报错，不覆盖第三方文件。
+- 执行顺序是先上传新内容，成功后再删除旧对象。删除失败会保留两个对象并明确报错，不会假装成功。
+- 单次覆盖在 OSS 层是原子的；改名模式包含“上传 + 删除”两步，不是跨对象原子操作，建议开启 Bucket 版本控制。
 
 ## 接入 MCP 客户端
 
@@ -594,6 +605,7 @@ $env:OSS_MCP_PORT = "8010"
 | 子命令 | 用途 | 关键选项 |
 | --- | --- | --- |
 | `upload` | 上传本地文件或网络文件 | `--file` / `--url`、`--key`、`--acl` |
+| `replace` | 用本地文件替换已有对象 | `--file`、`--key`、`--use-local-name`、`--acl` |
 | `download` | 下载单文件、多文件或目录 | `--key`（可重复）、`--prefix`、`-o`、`-d`、`--zip-name` |
 | `delete` | 删除一个或多个文件 | `--key`（可重复） |
 | `url` | 生成访问地址 | `--path`、`--prefix`、`--expires`、`--public` |
@@ -610,6 +622,14 @@ python src/oss_utils.py \
 # 从 URL 上传
 python src/oss_utils.py <认证参数> \
   upload --url https://example.com/logo.png --key lstd/pay/logo.png
+
+# 替换已有文件，保留原对象路径（URL 不变）
+python src/oss_utils.py <认证参数> \
+  replace --file ./new-logo.png --key lstd/pay/logo.png
+
+# 替换并按本地文件名改名，成功后删除旧对象
+python src/oss_utils.py <认证参数> \
+  replace --file ./new-logo.png --key lstd/pay/logo.png --use-local-name
 
 # 下载单个文件到目录
 python src/oss_utils.py <认证参数> \
@@ -641,6 +661,7 @@ python src/oss_utils.py <认证参数> \
 - 多文件 ZIP 内保留**完整 OSS 对象路径**，避免不同目录下的同名文件互相覆盖。
 - 目录 ZIP 内保留**相对目录前缀的路径**，例如 `lstd/pay/2026/01/a.txt` 会变成 `01/a.txt`。
 - 批量删除会自动去重，并每 1000 个对象提交一次。
+- `replace` 默认保留原对象路径；`--use-local-name` 使用本地文件名并删除旧对象。原对象不存在或改名目标已存在时返回 `1`。
 - 命令成功返回码为 `0`，OSS 或网络异常返回 `1`，参数错误由 argparse 返回非零退出码。
 
 ## 测试
@@ -661,13 +682,14 @@ bash tests/smoke_service_scripts.sh
 - 认证日志不会泄露 Token；
 - 启动脚本的 Windows / POSIX 虚拟环境路径识别、解释器依赖检测、缺依赖回退与自动安装；
 - 本地上传、URL 上传、ACL 请求头、非法 ACL 拒绝；
+- 替换文件：保留原名、按本地文件名改名、原对象不存在、改名目标重名、删除旧对象失败；
 - 单文件下载、多文件 ZIP、目录 ZIP、空目录报错；
 - 对象存在性判断（存在 / 不存在 / 空路径）；
 - 分组别名路由、默认分组、未知分组报错；
 - 批量删除去重与 1000 个一批的分片；
 - 公共读直链与私有签名 URL；
 - MCP stdio 与 streamable-http 两种传输方式，HTTP 端口动态分配；
-- 命令行上传、下载、删除、URL 生成和缺少认证参数的情况。
+- 命令行上传、替换、下载、删除、URL 生成和缺少认证参数的情况。
 
 测试使用内置的假 Bucket 和临时配置，不需要真实 AccessKey，也不会访问真实 OSS。真实环境的权限、网络、签名和 Bucket 策略仍建议上线前用测试 Bucket 联调一次。
 
@@ -696,7 +718,7 @@ bash tests/smoke_service_scripts.sh
 
 - **不要提交真实配置**：只提交 `config/oss_config.example.json`；`config/oss_config.json` 已被 `.gitignore` 排除，其中可能同时包含 AccessKey 和 Bearer Token。
 - **最小权限**：为 MCP 单独创建 RAM 用户或 STS 临时凭证，只授予需要的 Bucket / 前缀权限，避免使用主账号 AccessKey。
-- **谨慎开放删除能力**：`delete_file`、`delete_files` 不可恢复；建议开启 Bucket 版本控制或定期备份，并在客户端启用人工确认。
+- **谨慎开放删除能力**：`delete_file`、`delete_files` 不可恢复；`replace_file` 在改名模式下也会删除旧对象，并可能覆盖原对象内容。建议开启 Bucket 版本控制或定期备份，并在客户端启用人工确认。
 - **HTTP 服务优先只监听本机**：`127.0.0.1` 不会暴露到局域网。监听非本机地址时服务强制要求 Bearer Token，但仍应通过反向代理增加 TLS、来源限制和访问日志。
 - **妥善保管 Bearer Token**：使用至少 16 位可打印 ASCII 的随机值，优先放在环境变量或已被忽略的配置文件中；怀疑泄露时立即轮换 Token 并重启服务。
 - **令牌不是用户体系**：当前 Bearer Token 是所有客户端共享的静态令牌，只表示“持有令牌”，不提供用户身份、权限分级或审计归属。
@@ -709,6 +731,8 @@ bash tests/smoke_service_scripts.sh
 - 目录下载当前按对象顺序串行下载，超大目录耗时取决于网络和对象数量。
 - URL 上传会先把远程内容读入内存，超大文件建议先落盘再使用 `upload_file`。
 - 不提供断点续传、分片上传进度展示或下载限速。
+- `replace_file` 改名模式由“上传新对象 + 删除旧对象”两步完成，不是跨对象原子操作；删除失败时新旧对象会同时存在，并返回明确错误。
+- `replace_file` 不传 `acl` 时，新对象继承 Bucket ACL，不会自动沿用被替换对象的 ACL；替换公共读文件时请显式传 `acl=public-read`。
 - HTTP 模式使用单个静态 Bearer Token，不区分用户、不提供按工具授权、用量限流或 Token 自动轮换。
 - 启动脚本自动安装依赖需要可访问 PyPI；离线环境请先手动安装 `requirements.txt`，或设置 `OSS_MCP_AUTO_INSTALL=0` 后自行管理环境。
 - `file_exists` 只做精确对象匹配；判断“目录是否存在”需要按前缀列出对象，本工具不提供该语义。

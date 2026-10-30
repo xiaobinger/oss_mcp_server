@@ -149,13 +149,18 @@ async def tool_tests():
     names = [t.name for t in tools]
     print("tools:", names)
     assert names == [
-        "list_groups", "file_exists", "upload_file", "upload_from_url", "download_file", "download_files",
+        "list_groups", "file_exists", "upload_file", "upload_from_url", "replace_file", "download_file", "download_files",
         "download_folder", "delete_file", "delete_files", "get_file_url",
     ], names
     for t in tools:
         assert t.inputSchema.get("type") == "object"
         if t.name not in ("list_groups",):
             assert "group" in t.inputSchema["properties"], (t.name, t.inputSchema)
+
+    replace_tool = next(t for t in tools if t.name == "replace_file")
+    assert replace_tool.annotations.readOnlyHint is False
+    assert replace_tool.annotations.destructiveHint is True
+    assert "keep_original_name" in replace_tool.inputSchema["properties"]
 
     # list_groups 不泄露 secret / token
     groups_result = await call("list_groups", {})
@@ -224,6 +229,59 @@ async def tool_tests():
         })
     assert result["group"] == "prod"
     assert FAKES["prod-bucket"].objects["lstd/pay/a.png"] == b"from-url"
+
+    # replace_file：默认保留原对象路径
+    FAKES["prod-bucket"].objects["lstd/pay/to-replace.txt"] = b"old-content"
+    local = os.path.join(tmp, "replacement.txt")
+    with open(local, "wb") as f:
+        f.write(b"new-content")
+    result = await call("replace_file", {
+        "local_path": local, "object_name": "lstd/pay/to-replace.txt", "group": "海科",
+    })
+    assert result["group"] == "prod" and result["old_object_name"] == "lstd/pay/to-replace.txt"
+    assert result["new_object_name"] == "lstd/pay/to-replace.txt"
+    assert result["renamed"] is False and result["old_deleted"] is False
+    assert result["acl"] == "default" and result["size"] == len(b"new-content")
+    assert FAKES["prod-bucket"].objects["lstd/pay/to-replace.txt"] == b"new-content"
+
+    # replace_file：改名 + ACL，旧对象删除
+    FAKES["test-bucket"].objects["lstd/test/to-replace.txt"] = b"old"
+    local = os.path.join(tmp, "renamed-replacement.txt")
+    with open(local, "wb") as f:
+        f.write(b"renamed-content")
+    result = await call("replace_file", {
+        "local_path": local,
+        "object_name": "lstd/test/to-replace.txt",
+        "keep_original_name": False,
+        "acl": "public-read",
+        "group": "测试",
+    })
+    assert result["group"] == "test"
+    assert result["new_object_name"] == "lstd/test/renamed-replacement.txt"
+    assert result["renamed"] is True and result["old_deleted"] is True
+    assert "lstd/test/to-replace.txt" not in FAKES["test-bucket"].objects
+    assert FAKES["test-bucket"].objects["lstd/test/renamed-replacement.txt"] == b"renamed-content"
+    assert FAKES["test-bucket"].put_headers[-1] == {"x-oss-object-acl": "public-read"}
+
+    # replace_file：原对象不存在 / 改名目标重名 -> 报错且不改动对象
+    try:
+        await server.mcp.call_tool("replace_file", {
+            "local_path": local, "object_name": "lstd/pay/missing.txt", "group": "海科",
+        })
+        raise AssertionError("missing original should fail")
+    except Exception as exc:
+        assert "不存在" in str(exc), exc
+    FAKES["prod-bucket"].objects["lstd/pay/renamed-replacement.txt"] = b"third-party"
+    try:
+        await server.mcp.call_tool("replace_file", {
+            "local_path": local, "object_name": "lstd/pay/a.png",
+            "keep_original_name": False, "group": "海科",
+        })
+        raise AssertionError("existing rename target should fail")
+    except Exception as exc:
+        assert "目标对象已存在" in str(exc), exc
+    assert FAKES["prod-bucket"].objects["lstd/pay/a.png"] == b"from-url"
+    assert FAKES["prod-bucket"].objects["lstd/pay/renamed-replacement.txt"] == b"third-party"
 
     # download_file 走 test 组
     FAKES["test-bucket"].objects["lstd/test/dl.txt"] = b"dl"
@@ -359,7 +417,7 @@ async def stdio_test():
             assert "海科" in init.instructions and "测试" in init.instructions
             result = await session.list_tools()
             print("stdio tools:", [t.name for t in result.tools])
-            assert len(result.tools) == 10
+            assert len(result.tools) == 11
             listed = await session.call_tool("list_groups", {})
             payload = json.loads(listed.content[0].text)
             assert [g["name"] for g in payload["groups"]] == ["prod", "test"]
@@ -398,7 +456,7 @@ try:
                 await session.initialize()
                 result = await session.list_tools()
                 print("http tools:", [t.name for t in result.tools])
-                assert len(result.tools) == 10
+                assert len(result.tools) == 11
 
     asyncio.run(http_test())
 finally:
@@ -470,7 +528,7 @@ try:
                 await session.initialize()
                 result = await session.list_tools()
                 print("auth http tools:", [t.name for t in result.tools])
-                assert len(result.tools) == 10
+                assert len(result.tools) == 11
 
     asyncio.run(auth_http_test())
 finally:
