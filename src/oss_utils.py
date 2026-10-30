@@ -253,7 +253,7 @@ def downloadFiles(object_names, local_dir=".", zip_name=None, bucket=None):
 
 def downloadFolder(prefix, local_dir=".", zip_name=None, bucket=None):
     """下载整个目录（按前缀匹配）并打包为 zip，压缩包内保留目录内的相对路径
-    :param prefix: OSS 目录前缀，如 "lstd/pay/2026/"
+    :param prefix: OSS 目录前缀，如 "2026/"
     :param local_dir: zip 文件存放目录
     :param zip_name: zip 文件名或路径，不传时自动生成
     :param bucket: 指定 Bucket 客户端，不传则使用全局客户端
@@ -368,13 +368,13 @@ def _build_parser():
             "示例：\n"
             "  python src/oss_utils.py --access-key-id AK --access-key-secret SK "
             "--endpoint oss-cn-hangzhou.aliyuncs.com --bucket demo "
-            "upload --file ./a.png --key lstd/pay/a.png --acl public-read\n"
-            "  python src/oss_utils.py ... replace --file ./new.png --key lstd/pay/a.png\n"
-            "  python src/oss_utils.py ... replace --file ./new.png --key lstd/pay/a.png --use-local-name\n"
-            "  python src/oss_utils.py ... download --key lstd/pay/a.png --key lstd/pay/b.png -d ./downloads\n"
-            "  python src/oss_utils.py ... download --prefix lstd/pay/2026/ -d ./downloads\n"
-            "  python src/oss_utils.py ... delete --key lstd/pay/a.png --key lstd/pay/b.png\n"
-            "  python src/oss_utils.py ... url --path a.png --prefix lstd/pay/\n"
+            "upload --file ./a.png --key a.png --acl public-read\n"
+            "  python src/oss_utils.py ... replace --file ./new.png --key a.png\n"
+            "  python src/oss_utils.py ... replace --file ./new.png --key a.png --use-local-name\n"
+            "  python src/oss_utils.py ... download --key a.png --key b.png -d ./downloads\n"
+            "  python src/oss_utils.py ... download --prefix 2026/ -d ./downloads\n"
+            "  python src/oss_utils.py ... delete --key a.png --key b.png\n"
+            "  python src/oss_utils.py ... url --path a.png --prefix \n"
             "\n认证参数也可通过环境变量 OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET / "
             "OSS_SECURITY_TOKEN / OSS_ENDPOINT / OSS_BUCKET 提供。"
         ),
@@ -396,7 +396,7 @@ def _build_parser():
     source = upload.add_mutually_exclusive_group(required=True)
     source.add_argument("--file", help="本地文件路径")
     source.add_argument("--url", help="网络文件地址")
-    upload.add_argument("--key", required=True, help="OSS 对象路径，如 lstd/pay/a.png")
+    upload.add_argument("--key", required=True, help="OSS 对象路径，如 a.png")
     upload.add_argument("--acl", choices=list(ACL_MAP), help="对象 ACL 权限，默认继承 Bucket")
 
     replace = subparsers.add_parser("replace", help="用本地文件替换 OSS 上已有文件，默认保留原对象路径")
@@ -419,7 +419,7 @@ def _build_parser():
 
     url = subparsers.add_parser("url", help="获取文件的可访问地址")
     url.add_argument("--path", required=True, help="相对路径，如 user/avatar.jpg")
-    url.add_argument("--prefix", default="lstd/pay/", help="OSS 存储目录前缀，默认 lstd/pay/")
+    url.add_argument("--prefix", default="", help="OSS 存储目录前缀，默认 ")
     url.add_argument("--expires", type=int, default=3600, help="私有 Bucket 签名 URL 有效期（秒），默认 3600")
     url.add_argument("--public", action="store_true", help="Bucket 为公共读时直接拼接 URL")
 
