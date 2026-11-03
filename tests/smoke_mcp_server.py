@@ -330,6 +330,86 @@ async def tool_tests():
     result = await call("get_file_url", {"relative_path": "user/b.png", "group": "test"})
     assert result["url"] == "https://oss-cn-shanghai.aliyuncs.com/test-bucket/lstd/test/user/b.png?e=3600", result
 
+    # 已带分组前缀的路径不会重复拼接；显式 prefix 覆盖分组默认前缀
+    result = await call("get_file_url", {"relative_path": "lstd/pay/user/a.png"})
+    assert result["url"] == "https://static.example.com/lstd/pay/user/a.png", result
+    assert result["object_name"] == "lstd/pay/user/a.png", result
+    result = await call("get_file_url", {"relative_path": "lstd/pay/user/a.png", "public": False})
+    assert result["url"] == "https://oss-cn-hangzhou.aliyuncs.com/prod-bucket/lstd/pay/user/a.png?e=3600", result
+    result = await call("get_file_url", {"relative_path": "user/a.png", "prefix": "custom/", "group": "prod"})
+    assert result["url"] == "https://static.example.com/custom/user/a.png", result
+    assert result["prefix"] == "custom/", result
+
+    # 默认前缀：相对路径自动补齐，已带前缀不重复拼接
+    FAKES["prod-bucket"].objects["lstd/pay/prefix/known.txt"] = b"known"
+    result = await call("file_exists", {"object_name": "prefix/known.txt", "group": "prod"})
+    assert result["exists"] is True and result["object_name"] == "lstd/pay/prefix/known.txt", result
+    result = await call("file_exists", {"object_name": "lstd/pay/prefix/known.txt", "group": "prod"})
+    assert result["exists"] is True and result["object_name"] == "lstd/pay/prefix/known.txt", result
+
+    local_prefix = os.path.join(tmp, "prefix-up.txt")
+    with open(local_prefix, "wb") as f:
+        f.write(b"prefix-up")
+    result = await call("upload_file", {
+        "local_path": local_prefix, "object_name": "prefix/up.txt", "group": "prod",
+    })
+    assert result["object_name"] == "lstd/pay/prefix/up.txt", result
+    assert FAKES["prod-bucket"].objects["lstd/pay/prefix/up.txt"] == b"prefix-up"
+    assert "lstd/pay/lstd/pay/prefix/up.txt" not in FAKES["prod-bucket"].objects
+
+    result = await call("upload_file", {
+        "local_path": local_prefix, "object_name": "lstd/pay/prefix/up2.txt", "group": "prod",
+    })
+    assert result["object_name"] == "lstd/pay/prefix/up2.txt", result
+    assert FAKES["prod-bucket"].objects["lstd/pay/prefix/up2.txt"] == b"prefix-up"
+
+    with mock.patch.object(oss_utils.requests, "get", return_value=FakeResponse()):
+        result = await call("upload_from_url", {
+            "url": "https://example.com/p.png", "object_name": "prefix/url.png", "group": "test",
+        })
+    assert result["object_name"] == "lstd/test/prefix/url.png", result
+    assert FAKES["test-bucket"].objects["lstd/test/prefix/url.png"] == b"from-url"
+
+    result = await call("download_file", {
+        "object_name": "prefix/known.txt", "local_path": tmp, "group": "prod",
+    })
+    assert result["object_name"] == "lstd/pay/prefix/known.txt", result
+
+    result = await call("download_files", {
+        "object_names": ["prefix/up.txt", "lstd/pay/prefix/up2.txt", "prefix/up.txt"],
+        "local_dir": tmp, "zip_name": "prefix-multi.zip", "group": "prod",
+    })
+    assert result["file_count"] == 2, result
+    with zipfile.ZipFile(result["zip_path"]) as zf:
+        assert sorted(zf.namelist()) == ["lstd/pay/prefix/up.txt", "lstd/pay/prefix/up2.txt"], zf.namelist()
+
+    FAKES["prod-bucket"].objects.update({
+        "lstd/pay/prefix/dir/a.txt": b"a",
+        "lstd/pay/prefix/dir/sub/b.txt": b"b",
+    })
+    with mock.patch.object(oss_utils.oss2, "ObjectIterator", fake_iterator):
+        folder_result = await call("download_folder", {
+            "prefix": "prefix/dir", "local_dir": tmp, "zip_name": "prefix-folder.zip", "group": "prod",
+        })
+    assert folder_result["prefix"] == "lstd/pay/prefix/dir", folder_result
+    with zipfile.ZipFile(folder_result["zip_path"]) as zf:
+        assert sorted(zf.namelist()) == ["a.txt", "sub/b.txt"], zf.namelist()
+
+    result = await call("replace_file", {
+        "local_path": local_prefix, "object_name": "prefix/up2.txt", "group": "prod",
+    })
+    assert result["old_object_name"] == "lstd/pay/prefix/up2.txt", result
+    assert result["new_object_name"] == "lstd/pay/prefix/up2.txt", result
+    assert FAKES["prod-bucket"].objects["lstd/pay/prefix/up2.txt"] == b"prefix-up"
+
+    result = await call("delete_file", {"object_name": "prefix/known.txt", "group": "prod"})
+    assert result["deleted"] == ["lstd/pay/prefix/known.txt"], result
+    assert "lstd/pay/prefix/known.txt" not in FAKES["prod-bucket"].objects
+    result = await call("delete_files", {
+        "object_names": ["prefix/up2.txt", "lstd/pay/prefix/up2.txt"], "group": "prod",
+    })
+    assert result["deleted"] == ["lstd/pay/prefix/up2.txt"], result
+
     # 删除分组路由
     await call("delete_file", {"object_name": "lstd/test/up.txt", "group": "test"})
     assert "lstd/test/up.txt" not in FAKES["test-bucket"].objects

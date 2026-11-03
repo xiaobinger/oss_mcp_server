@@ -75,6 +75,8 @@ mcp = FastMCP(
         "支持：判断文件是否存在；上传本地文件或网络文件（可指定对象 ACL）；替换已有文件"
         "（默认保留原对象路径，也可按本地文件名改名）；下载单文件、多文件或整个目录"
         "（多文件/目录自动打包为 zip）；删除单个或批量删除文件；获取文件访问地址。"
+        "对象路径可传相对路径（如 a.png），未以分组 default_prefix 开头时自动拼接；"
+        "已带前缀的路径不会重复拼接。"
     ),
 )
 
@@ -151,6 +153,9 @@ def _build_group(name, raw):
     bucket_name = _pick(raw, "bucket", "bucket_name", "bucketName")
     domain = _pick(raw, "domain")
     aliases = _collect_aliases(raw)
+    default_prefix = _pick(raw, "default_prefix", "defaultPrefix", "prefix") or ""
+    if not isinstance(default_prefix, str):
+        raise ValueError(f"分组 {name} 的 default_prefix 必须是字符串")
 
     missing = [key for key, value in (
         ("access_key_id / accessKey", access_key_id),
@@ -171,7 +176,7 @@ def _build_group(name, raw):
         "endpoint": endpoint,
         "bucket": bucket_name,
         "domain": _normalize_domain(domain) if domain else None,
-        "prefix": _pick(raw, "default_prefix", "defaultPrefix", "prefix") or "",
+        "prefix": default_prefix,
         "public_read": bool(raw.get("public_read", raw.get("publicRead", False))),
     }
     bucket = oss_utils.createBucketClient({
@@ -245,7 +250,10 @@ def _build_instructions():
         config = entry["config"]
         aliases = "、".join(config["aliases"]) if config["aliases"] else "无"
         default_tag = "（默认）" if name == _default_group else ""
-        lines.append(f"- {name}{default_tag}：别名 {aliases}，bucket {config['bucket']}")
+        lines.append(
+            f"- {name}{default_tag}：别名 {aliases}，bucket {config['bucket']}，"
+            f"默认前缀 {config['prefix'] or '无'}"
+        )
     lines.append("可调用 list_groups 查看完整分组信息（不会返回 Secret）。")
     return "\n".join(lines)
 
@@ -303,6 +311,21 @@ def _execute(func, *args, **kwargs):
         raise ToolError(f"OSS 操作失败：{exc}") from exc
 
 
+def _normalize_object_name(config, object_name):
+    """按分组默认前缀归一化对象路径，已带前缀时不重复拼接"""
+    return _execute(oss_utils.normalizeObjectName, object_name, config["prefix"])
+
+
+def _normalize_object_names(config, object_names):
+    """按分组默认前缀归一化对象路径列表并去重"""
+    names = []
+    for name in object_names:
+        if not isinstance(name, str) or not name.strip():
+            continue
+        names.append(_normalize_object_name(config, name))
+    return list(dict.fromkeys(names))
+
+
 def _mask_access_key(value):
     if not value:
         return ""
@@ -348,16 +371,17 @@ def list_groups() -> dict:
 def file_exists(object_name: str, group: Optional[str] = None) -> dict:
     """判断 OSS 上的文件（对象）是否存在，仅精确匹配传入的对象路径。
 
-    :param object_name: OSS 对象路径，如 a.png
+    :param object_name: OSS 对象路径，如 a.png（未以分组 default_prefix 开头时自动拼接）
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
     """
     config, bucket = _resolve_group(group)
-    exists = _execute(oss_utils.objectExists, object_name, bucket=bucket)
+    full_name = _normalize_object_name(config, object_name)
+    exists = _execute(oss_utils.objectExists, object_name, bucket=bucket, default_prefix=config["prefix"])
     return {
         "group": config["name"],
         "group_alias": config["alias"],
         "bucket": config["bucket"],
-        "object_name": object_name,
+        "object_name": full_name,
         "exists": exists,
     }
 
@@ -374,17 +398,19 @@ def upload_file(
     """上传本地文件到 OSS。
 
     :param local_path: 本地文件路径（绝对路径或相对当前工作目录）
-    :param object_name: OSS 对象路径，如 a.png
+    :param object_name: OSS 对象路径，如 a.png（未以分组 default_prefix 开头时自动拼接）
     :param acl: 对象 ACL：default/private/public-read/public-read-write，不传则继承 Bucket
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
     """
     config, bucket = _resolve_group(group)
-    _execute(oss_utils.uploadLocalFile, local_path, object_name, acl=acl, bucket=bucket)
+    full_name = _execute(
+        oss_utils.uploadLocalFile, local_path, object_name, acl=acl, bucket=bucket, default_prefix=config["prefix"],
+    )
     result = {
         "group": config["name"],
         "group_alias": config["alias"],
         "bucket": config["bucket"],
-        "object_name": object_name,
+        "object_name": full_name,
         "acl": acl or "default",
     }
     if os.path.isfile(local_path):
@@ -404,17 +430,19 @@ def upload_from_url(
     """从网络地址下载文件并上传到 OSS。
 
     :param url: 源文件网络地址
-    :param object_name: OSS 对象路径，如 a.png
+    :param object_name: OSS 对象路径，如 a.png（未以分组 default_prefix 开头时自动拼接）
     :param acl: 对象 ACL：default/private/public-read/public-read-write，不传则继承 Bucket
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
     """
     config, bucket = _resolve_group(group)
-    _execute(oss_utils.uploadFile, url, object_name, acl=acl, bucket=bucket)
+    full_name = _execute(
+        oss_utils.uploadFile, url, object_name, acl=acl, bucket=bucket, default_prefix=config["prefix"],
+    )
     return {
         "group": config["name"],
         "group_alias": config["alias"],
         "bucket": config["bucket"],
-        "object_name": object_name,
+        "object_name": full_name,
         "acl": acl or "default",
         "source_url": url,
     }
@@ -436,7 +464,7 @@ def replace_file(
     放到原对象所在目录，新文件上传成功后再删除旧对象。原对象不存在或改名目标已存在时拒绝执行。
 
     :param local_path: 新内容的本地文件路径
-    :param object_name: 被替换的 OSS 对象路径，如 a.png
+    :param object_name: 被替换的 OSS 对象路径，如 a.png（未以分组 default_prefix 开头时自动拼接）
     :param keep_original_name: 是否保留原对象路径，默认 true；false 时按本地文件名改名并删除旧对象
     :param acl: 新对象 ACL：default/private/public-read/public-read-write，不传则继承 Bucket
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
@@ -449,6 +477,7 @@ def replace_file(
         keep_original_name=keep_original_name,
         acl=acl,
         bucket=bucket,
+        default_prefix=config["prefix"],
     )
     return {
         "group": config["name"],
@@ -470,17 +499,20 @@ def download_file(
 ) -> dict:
     """下载单个文件到本地。
 
-    :param object_name: OSS 对象路径，如 a.png
+    :param object_name: OSS 对象路径，如 a.png（未以分组 default_prefix 开头时自动拼接）
     :param local_path: 本地保存路径或目录；不传时保存为当前目录下的文件名
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
     """
     config, bucket = _resolve_group(group)
-    path = _execute(oss_utils.downloadFile, object_name, local_path, bucket=bucket)
+    full_name = _normalize_object_name(config, object_name)
+    path = _execute(
+        oss_utils.downloadFile, object_name, local_path, bucket=bucket, default_prefix=config["prefix"],
+    )
     return {
         "group": config["name"],
         "group_alias": config["alias"],
         "bucket": config["bucket"],
-        "object_name": object_name,
+        "object_name": full_name,
         "local_path": os.path.abspath(path),
         "size": os.path.getsize(path),
     }
@@ -497,19 +529,27 @@ def download_files(
 ) -> dict:
     """下载多个文件并打包为 zip，压缩包内保留完整 OSS 对象路径。
 
-    :param object_names: OSS 对象路径列表
+    :param object_names: OSS 对象路径列表（未以分组 default_prefix 开头时自动拼接）
     :param local_dir: zip 文件存放目录，默认当前目录
     :param zip_name: zip 文件名或路径，不传时自动生成
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
     """
     config, bucket = _resolve_group(group)
-    path = _execute(oss_utils.downloadFiles, object_names, local_dir=local_dir, zip_name=zip_name, bucket=bucket)
+    normalized_names = _normalize_object_names(config, object_names)
+    path = _execute(
+        oss_utils.downloadFiles,
+        normalized_names,
+        local_dir=local_dir,
+        zip_name=zip_name,
+        bucket=bucket,
+        default_prefix=config["prefix"],
+    )
     return {
         "group": config["name"],
         "group_alias": config["alias"],
         "bucket": config["bucket"],
         "zip_path": os.path.abspath(path),
-        "file_count": len({name for name in object_names if name}),
+        "file_count": len(normalized_names),
     }
 
 
@@ -524,17 +564,26 @@ def download_folder(
 ) -> dict:
     """下载整个目录（按 OSS 前缀匹配）并打包为 zip，压缩包内保留目录内相对路径。
 
-    :param prefix: OSS 目录前缀，如 2026/
+    :param prefix: OSS 目录前缀，如 2026/（未以分组 default_prefix 开头时自动拼接）
     :param local_dir: zip 文件存放目录，默认当前目录
     :param zip_name: zip 文件名或路径，不传时自动生成
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
     """
     config, bucket = _resolve_group(group)
-    path = _execute(oss_utils.downloadFolder, prefix, local_dir=local_dir, zip_name=zip_name, bucket=bucket)
+    full_prefix = _normalize_object_name(config, prefix)
+    path = _execute(
+        oss_utils.downloadFolder,
+        prefix,
+        local_dir=local_dir,
+        zip_name=zip_name,
+        bucket=bucket,
+        default_prefix=config["prefix"],
+    )
     return {
         "group": config["name"],
         "group_alias": config["alias"],
         "bucket": config["bucket"],
+        "prefix": full_prefix,
         "zip_path": os.path.abspath(path),
     }
 
@@ -545,12 +594,20 @@ def download_folder(
 def delete_file(object_name: str, group: Optional[str] = None) -> dict:
     """删除单个 OSS 文件（不可恢复，请谨慎调用）。
 
-    :param object_name: OSS 对象路径，如 a.png
+    :param object_name: OSS 对象路径，如 a.png（未以分组 default_prefix 开头时自动拼接）
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
     """
     config, bucket = _resolve_group(group)
-    _execute(oss_utils.deleteFile, object_name, bucket=bucket)
-    return {"group": config["name"], "group_alias": config["alias"], "bucket": config["bucket"], "deleted": [object_name], "count": 1}
+    deleted_name = _execute(
+        oss_utils.deleteFile, object_name, bucket=bucket, default_prefix=config["prefix"],
+    )
+    return {
+        "group": config["name"],
+        "group_alias": config["alias"],
+        "bucket": config["bucket"],
+        "deleted": [deleted_name],
+        "count": 1,
+    }
 
 
 @mcp.tool(
@@ -559,11 +616,13 @@ def delete_file(object_name: str, group: Optional[str] = None) -> dict:
 def delete_files(object_names: List[str], group: Optional[str] = None) -> dict:
     """批量删除 OSS 文件（不可恢复，请谨慎调用），自动按 1000 个一批提交。
 
-    :param object_names: OSS 对象路径列表
+    :param object_names: OSS 对象路径列表（未以分组 default_prefix 开头时自动拼接）
     :param group: 认证分组名称或别名（可用 list_groups 查看），不传则使用默认分组
     """
     config, bucket = _resolve_group(group)
-    deleted = _execute(oss_utils.deleteFiles, object_names, bucket=bucket)
+    deleted = _execute(
+        oss_utils.deleteFiles, object_names, bucket=bucket, default_prefix=config["prefix"],
+    )
     return {"group": config["name"], "group_alias": config["alias"], "bucket": config["bucket"], "deleted": deleted, "count": len(deleted)}
 
 
@@ -579,8 +638,8 @@ def get_file_url(
 ) -> dict:
     """获取 OSS 文件的可访问地址。
 
-    :param relative_path: 相对路径，如 user/avatar.jpg
-    :param prefix: OSS 存储目录前缀，不传则使用分组配置的 default_prefix（默认 ）
+    :param relative_path: 相对路径，如 user/avatar.jpg（未以 prefix 开头时自动拼接）
+    :param prefix: OSS 存储目录前缀，不传则使用分组配置的 default_prefix（已带前缀的路径不会重复拼接）
     :param expires: 私有 Bucket 签名 URL 有效期（秒），默认 3600
     :param public: 是否公共读；不传则使用分组配置的 public_read。
                    公共读且分组配置了 domain 时优先使用 domain 拼接地址
@@ -589,9 +648,9 @@ def get_file_url(
     config, bucket = _resolve_group(group)
     url_prefix = prefix or config["prefix"]
     is_public = config["public_read"] if public is None else public
+    full_path = _execute(oss_utils.normalizeObjectName, relative_path, url_prefix)
 
     if is_public and config.get("domain"):
-        full_path = f"{url_prefix.rstrip('/')}/{relative_path.lstrip('/')}"
         url = f"{config['domain']}/{full_path}"
     else:
         url = _execute(
@@ -603,7 +662,14 @@ def get_file_url(
             bucket=bucket,
         )
 
-    return {"group": config["name"], "group_alias": config["alias"], "bucket": config["bucket"], "url": url, "prefix": url_prefix}
+    return {
+        "group": config["name"],
+        "group_alias": config["alias"],
+        "bucket": config["bucket"],
+        "url": url,
+        "prefix": url_prefix,
+        "object_name": full_path,
+    }
 
 
 def _build_parser():
@@ -626,7 +692,7 @@ def _build_parser():
     parser.add_argument("--domain", default=os.environ.get("OSS_DOMAIN"),
                         help="单分组模式：文件访问域名（可选，公共读时优先使用）")
     parser.add_argument("--default-prefix", default=os.environ.get("OSS_DEFAULT_PREFIX", ""),
-                        help="单分组模式：生成 URL 时的默认前缀，默认 ")
+                        help="单分组模式：对象路径的默认前缀，未以它开头时自动拼接")
     parser.add_argument("--public-read", action="store_true",
                         default=os.environ.get("OSS_PUBLIC_READ", "").lower() in ("1", "true", "yes"),
                         help="单分组模式：Bucket 是否公共读")

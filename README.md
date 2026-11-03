@@ -45,6 +45,7 @@
 - **删除**：支持单个删除和批量删除；批量删除自动去重，并按 OSS 限制每 1000 个一批提交。
 - **访问地址**：公共读 Bucket 可使用自定义域名直链；私有 Bucket 自动生成带有效期的签名 URL。
 - **多分组认证**：一个配置文件管理多套 AccessKey、Endpoint、Bucket，并通过别名做自然语言路由。
+- **默认路径前缀**：分组可配置 `default_prefix`；MCP 工具传 `a.png` 会自动补成 `lstd/pay/a.png`，已带前缀的路径不会重复拼接。
 - **HTTP Bearer 认证**：HTTP/SSE 模式支持 Bearer Token；监听非本机地址时强制配置，避免 OSS 能力裸奔。
 - **两种接入方式**：MCP 客户端本地拉起（stdio），或作为后台 HTTP 服务运行（streamable-http / SSE）。
 - **跨平台托管**：提供 Linux / macOS 和 Windows 的启动、停止、重启、状态、日志脚本。
@@ -215,10 +216,12 @@ chmod +x scripts/mcp_service.sh
 | `endpoint` | 是 | 如 `oss-cn-hangzhou.aliyuncs.com` |
 | `bucket` | 是 | 兼容 `bucket_name`、`bucketName` |
 | `domain` | 否 | 自定义访问域名；未写协议时自动补 `https://`，公共读时优先用于拼接 URL |
-| `default_prefix` | 否 | 生成 URL 时的默认目录前缀，兼容 `defaultPrefix`、`prefix`，默认 `lstd/pay/` |
+| `default_prefix` | 否 | 对象的默认目录前缀，如 `lstd/pay/`；MCP 工具收到未以它开头的对象路径时自动拼接，已带前缀则不重复。兼容 `defaultPrefix`、`prefix`，默认空（不拼接） |
 | `public_read` | 否 | JSON 布尔值，兼容 `publicRead`；默认 `false`（签名 URL） |
 
 `http_bearer_token` 是配置文件根节点字段，不要放进某个分组内部。`public_read` 等布尔字段请使用 JSON 布尔值，不要写成字符串。
+
+`config/oss_config.example.json` 模板中的 `default_prefix` 默认为空；需要让 MCP 工具接受 `a.png` 这类相对路径时，填入统一目录前缀（如 `lstd/pay/`）。
 
 生成一个足够随机的 Token：
 
@@ -280,13 +283,14 @@ python src/oss_mcp_server.py \
 
 ### 参数补充
 
+- **对象路径与 `default_prefix`**：`object_name`、`object_names`、下载的 `prefix` 以及 `relative_path` 都支持相对路径。未以分组 `default_prefix` 开头时自动补齐，已带前缀时保持不变；前导 `/` 会被去掉。例如分组前缀为 `lstd/pay/` 时，`a.png` 和 `lstd/pay/a.png` 指向同一个对象，批量列表会先归一化再去重。
 - **`acl`**：可选 `default`、`private`、`public-read`、`public-read-write`。不传时继承 Bucket 的 ACL。
 - **`keep_original_name`**：仅 `replace_file` 使用。默认 `true`，表示覆盖原对象内容、对象路径和 URL 不变；设为 `false` 时使用本地文件名放到原对象所在目录，上传成功后删除旧对象。
 - **`local_path`**：可以是文件路径，也可以是已存在的目录；传入目录时保留 OSS 文件名。不传时保存到当前工作目录。
 - **`local_dir`**：ZIP 的存放目录，默认当前工作目录。
 - **`zip_name`**：ZIP 文件名或路径。不传时自动生成，例如 `prod-bucket_download_20261029_153000.zip`。
 - **`prefix`（下载）**：未以 `/` 结尾时会自动补齐；空目录会报错，并把已创建的空 ZIP 删除。
-- **`prefix`（获取 URL）**：不传时使用分组的 `default_prefix`。
+- **`prefix`（获取 URL）**：不传时使用分组的 `default_prefix`；传入已经带完整前缀的路径也不会重复拼接。
 - **`expires`**：私有签名 URL 的有效期，单位秒，默认 3600。
 - **`public`**：不传时使用分组的 `public_read`。
 
@@ -302,7 +306,7 @@ python src/oss_mcp_server.py \
 }
 ```
 
-下载类工具返回本地绝对路径和大小；批量删除返回实际删除的对象列表。`replace_file` 返回 `old_object_name`、`new_object_name`、`renamed`、`old_deleted`，便于确认是否改名以及旧对象是否已删除。`delete_file`、`delete_files` 与 `replace_file` 带有 destructive 注解，支持该能力的客户端通常会请求二次确认。
+下载类工具返回本地绝对路径和大小；批量删除返回实际删除的对象列表。`replace_file` 返回 `old_object_name`、`new_object_name`、`renamed`、`old_deleted`，便于确认是否改名以及旧对象是否已删除。返回值中的 `object_name`、`deleted`、`prefix`、`file_count` 都基于补全默认前缀后的完整路径计算。`delete_file`、`delete_files` 与 `replace_file` 带有 destructive 注解，支持该能力的客户端通常会请求二次确认。
 
 ### 替换规则
 
@@ -397,6 +401,7 @@ python src/oss_mcp_server.py --config config/oss_config.json \
 | 从生产 OSS 下载 `lstd/pay/a.png` | `group="生产"` |
 | 看看测试 OSS 上有没有 `lstd/test/b.png` | `group="测试"` |
 | 上传到 OSS 的 `lstd/pay/c.png` | 不传 `group`，使用默认分组 |
+| 上传 `c.png` 到生产 OSS | `group="生产"`、`object_name="c.png"`，自动补成 `lstd/pay/c.png` |
 
 服务初始化信息中会列出所有分组和别名，工具的 `group` 参数描述也会动态写入别名列表，模型不需要猜测。
 
@@ -597,7 +602,7 @@ $env:OSS_MCP_PORT = "8010"
 
 ## 命令行工具
 
-`src/oss_utils.py` 可以脱离 MCP 单独使用，适合脚本、定时任务和临时排查。认证参数是全局参数，必须放在子命令之前。
+`src/oss_utils.py` 可以脱离 MCP 单独使用，适合脚本、定时任务和临时排查。认证参数是全局参数，必须放在子命令之前。命令行工具不读取分组配置，`default_prefix` 只作用于 MCP 分组；CLI 请直接传入完整对象路径（或显式使用 `url --prefix`）。
 
 ### 认证参数
 
@@ -695,6 +700,7 @@ bash tests/smoke_service_scripts.sh
 - 单文件下载、多文件 ZIP、目录 ZIP、空目录报错；
 - 对象存在性判断（存在 / 不存在 / 空路径）；
 - 分组别名路由、默认分组、未知分组报错；
+- 默认前缀归一化：相对路径自动补齐、已带前缀不重复、批量列表归一化去重、目录与 URL 拼接一致；
 - 批量删除去重与 1000 个一批的分片；
 - 公共读直链与私有签名 URL；
 - MCP stdio 与 streamable-http 两种传输方式，HTTP 端口动态分配；

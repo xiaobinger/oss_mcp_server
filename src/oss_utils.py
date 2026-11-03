@@ -77,14 +77,47 @@ def _build_acl_headers(acl):
     return {"x-oss-object-acl": permission}
 
 
-def uploadFile(src_url, object_name, acl=None, bucket=None):
+def normalizeObjectName(object_name, default_prefix=None):
+    """归一化 OSS 对象路径：未以默认前缀开头时自动补齐，已带前缀时保持不变
+
+    :param object_name: OSS 对象路径或目录前缀，如 "a.png"、"lstd/pay/a.png"
+    :param default_prefix: 分组配置的默认路径前缀，如 "lstd/pay/"；为空时原样返回
+    :return: 规范化后的对象路径
+    """
+    if not isinstance(object_name, str) or not object_name.strip():
+        raise ValueError("对象路径不能为空")
+
+    name = object_name.lstrip('/')
+    if not name:
+        raise ValueError("对象路径不能为空")
+
+    if not default_prefix:
+        return name
+    if not isinstance(default_prefix, str):
+        raise ValueError("默认前缀 default_prefix 必须是字符串")
+
+    prefix = default_prefix.strip().lstrip('/')
+    if not prefix:
+        return name
+    if not prefix.endswith('/'):
+        prefix += '/'
+
+    # 对象本身等于前缀根目录（不带末尾 /）时也视为已带前缀，避免下载整个目录时重复拼接
+    if name == prefix.rstrip('/') or name.startswith(prefix):
+        return name
+    return prefix + name
+
+
+def uploadFile(src_url, object_name, acl=None, bucket=None, default_prefix=None):
     """从网络地址下载文件并上传到 OSS
     :param src_url: 源文件网络地址
     :param object_name: OSS 对象路径
     :param acl: 对象 ACL（default/private/public-read/public-read-write），None 表示继承 Bucket
     :param bucket: 指定 Bucket 客户端，不传则使用全局客户端
+    :param default_prefix: 默认路径前缀，对象路径未以它开头时自动拼接
     """
     bucket_client = bucket or _require_bucket()
+    object_name = normalizeObjectName(object_name, default_prefix)
     response = requests.get(src_url, timeout=60)
     response.raise_for_status()
     bucket_client.put_object(object_name, response.content, headers=_build_acl_headers(acl))
@@ -93,14 +126,16 @@ def uploadFile(src_url, object_name, acl=None, bucket=None):
     return object_name
 
 
-def uploadLocalFile(local_path, object_name, acl=None, bucket=None):
+def uploadLocalFile(local_path, object_name, acl=None, bucket=None, default_prefix=None):
     """上传本地文件到 OSS
     :param local_path: 本地文件路径
     :param object_name: OSS 对象路径
     :param acl: 对象 ACL（default/private/public-read/public-read-write），None 表示继承 Bucket
     :param bucket: 指定 Bucket 客户端，不传则使用全局客户端
+    :param default_prefix: 默认路径前缀，对象路径未以它开头时自动拼接
     """
     bucket_client = bucket or _require_bucket()
+    object_name = normalizeObjectName(object_name, default_prefix)
     if not os.path.isfile(local_path):
         raise FileNotFoundError(f"本地文件不存在：{local_path}")
 
@@ -111,18 +146,18 @@ def uploadLocalFile(local_path, object_name, acl=None, bucket=None):
     return object_name
 
 
-def replaceFile(local_path, object_name, keep_original_name=True, acl=None, bucket=None):
+def replaceFile(local_path, object_name, keep_original_name=True, acl=None, bucket=None, default_prefix=None):
     """用本地文件替换 OSS 上已有的对象
     :param local_path: 新内容的本地文件路径
     :param object_name: 被替换的 OSS 对象路径
     :param keep_original_name: True 保留原对象路径；False 使用本地文件名放到原目录，并删除旧对象
     :param acl: 新对象 ACL（default/private/public-read/public-read-write），None 表示继承 Bucket
     :param bucket: 指定 Bucket 客户端，不传则使用全局客户端
+    :param default_prefix: 默认路径前缀，对象路径未以它开头时自动拼接
     :return: 替换结果，包含新旧对象路径与是否改名、是否删除旧对象
     """
     bucket_client = bucket or _require_bucket()
-    if not object_name or not object_name.strip():
-        raise ValueError("对象路径不能为空")
+    object_name = normalizeObjectName(object_name, default_prefix)
     if object_name.endswith('/'):
         raise ValueError("对象路径不能以 / 结尾（这是目录前缀，不是文件）")
     if not os.path.isfile(local_path):
@@ -172,7 +207,7 @@ def get_oss_image_url(
     """
     根据相对路径生成OSS图片的可访问URL（使用已初始化的Bucket客户端）
     :param relative_path: 图片的相对路径（如 "user/avatar.jpg"）
-    :param prefix: OSS存储路径前缀（末尾需加"/"，默认为"images/"）
+    :param prefix: OSS存储路径前缀；相对路径未以它开头时自动拼接，为空时不拼接
     :param expires: URL有效期（秒），仅私有Bucket需要
     :param is_public_bucket: Bucket是否为公共读
     :param bucket: 指定 Bucket 客户端，不传则使用全局客户端
@@ -180,8 +215,8 @@ def get_oss_image_url(
     """
     bucket_client = bucket or _require_bucket()
 
-    # 拼接完整OSS路径（避免双斜杠）
-    full_path = f"{prefix.rstrip('/')}/{relative_path.lstrip('/')}"
+    # 拼接完整OSS路径（已带前缀时不重复拼接，也不会产生双斜杠）
+    full_path = normalizeObjectName(relative_path, prefix)
 
     # 1. 如果是公开读Bucket，直接拼接URL
     if is_public_bucket:
@@ -203,13 +238,15 @@ def get_oss_image_url(
     )
 
 
-def downloadFile(object_name, local_path=None, bucket=None):
+def downloadFile(object_name, local_path=None, bucket=None, default_prefix=None):
     """下载单个文件到本地
     :param object_name: OSS 对象路径
     :param local_path: 本地保存路径或目录，不传时保存为当前目录下的文件名
     :param bucket: 指定 Bucket 客户端，不传则使用全局客户端
+    :param default_prefix: 默认路径前缀，对象路径未以它开头时自动拼接
     """
     bucket_client = bucket or _require_bucket()
+    object_name = normalizeObjectName(object_name, default_prefix)
     file_name = os.path.basename(object_name.rstrip('/'))
     if not local_path:
         local_path = file_name
@@ -225,16 +262,23 @@ def downloadFile(object_name, local_path=None, bucket=None):
     return local_path
 
 
-def downloadFiles(object_names, local_dir=".", zip_name=None, bucket=None):
+def downloadFiles(object_names, local_dir=".", zip_name=None, bucket=None, default_prefix=None):
     """下载多个文件并打包为 zip
     :param object_names: OSS 对象路径列表
     :param local_dir: zip 文件存放目录
     :param zip_name: zip 文件名或路径，不传时自动生成
     :param bucket: 指定 Bucket 客户端，不传则使用全局客户端
+    :param default_prefix: 默认路径前缀，对象路径未以它开头时自动拼接
     :return: zip 文件路径
     """
     bucket_client = bucket or _require_bucket()
-    object_names = list(dict.fromkeys(name for name in object_names if name))
+    normalized = []
+    for name in object_names:
+        if not isinstance(name, str) or not name.strip():
+            continue
+        normalized.append(normalizeObjectName(name, default_prefix))
+    # 归一化后再去重，避免 "a.png" 与 "lstd/pay/a.png" 被当作两个文件
+    object_names = list(dict.fromkeys(normalized))
     if not object_names:
         raise ValueError("待下载的文件列表不能为空")
 
@@ -251,18 +295,17 @@ def downloadFiles(object_names, local_dir=".", zip_name=None, bucket=None):
     return zip_path
 
 
-def downloadFolder(prefix, local_dir=".", zip_name=None, bucket=None):
+def downloadFolder(prefix, local_dir=".", zip_name=None, bucket=None, default_prefix=None):
     """下载整个目录（按前缀匹配）并打包为 zip，压缩包内保留目录内的相对路径
     :param prefix: OSS 目录前缀，如 "2026/"
     :param local_dir: zip 文件存放目录
     :param zip_name: zip 文件名或路径，不传时自动生成
     :param bucket: 指定 Bucket 客户端，不传则使用全局客户端
+    :param default_prefix: 默认路径前缀，目录前缀未以它开头时自动拼接
     :return: zip 文件路径
     """
     bucket_client = bucket or _require_bucket()
-    prefix = prefix.lstrip('/')
-    if not prefix:
-        raise ValueError("目录前缀不能为空")
+    prefix = normalizeObjectName(prefix, default_prefix)
     if not prefix.endswith('/'):
         prefix += '/'
 
@@ -287,36 +330,44 @@ def downloadFolder(prefix, local_dir=".", zip_name=None, bucket=None):
     return zip_path
 
 
-def objectExists(object_name, bucket=None):
+def objectExists(object_name, bucket=None, default_prefix=None):
     """判断 OSS 对象（文件）是否存在
     :param object_name: OSS 对象路径
     :param bucket: 指定 Bucket 客户端，不传则使用全局客户端
+    :param default_prefix: 默认路径前缀，对象路径未以它开头时自动拼接
     :return: True 表示存在，False 表示不存在
     """
-    if not object_name or not object_name.strip():
-        raise ValueError("对象路径不能为空")
+    object_name = normalizeObjectName(object_name, default_prefix)
     bucket_client = bucket or _require_bucket()
     return bucket_client.object_exists(object_name)
 
 
-def deleteFile(object_name, bucket=None):
+def deleteFile(object_name, bucket=None, default_prefix=None):
     """删除单个文件
     :param bucket: 指定 Bucket 客户端，不传则使用全局客户端
+    :param default_prefix: 默认路径前缀，对象路径未以它开头时自动拼接
     """
     bucket_client = bucket or _require_bucket()
+    object_name = normalizeObjectName(object_name, default_prefix)
     bucket_client.delete_object(object_name)
 
     _log(f'文件已删除：{object_name}')
     return object_name
 
 
-def deleteFiles(object_names, bucket=None):
+def deleteFiles(object_names, bucket=None, default_prefix=None):
     """批量删除文件，超过 1000 个时自动分批
     :param bucket: 指定 Bucket 客户端，不传则使用全局客户端
+    :param default_prefix: 默认路径前缀，对象路径未以它开头时自动拼接
     :return: 实际删除的对象路径列表
     """
     bucket_client = bucket or _require_bucket()
-    keys = list(dict.fromkeys(name for name in object_names if name))
+    normalized = []
+    for name in object_names:
+        if not isinstance(name, str) or not name.strip():
+            continue
+        normalized.append(normalizeObjectName(name, default_prefix))
+    keys = list(dict.fromkeys(normalized))
     if not keys:
         raise ValueError("待删除的文件列表不能为空")
 
@@ -419,7 +470,7 @@ def _build_parser():
 
     url = subparsers.add_parser("url", help="获取文件的可访问地址")
     url.add_argument("--path", required=True, help="相对路径，如 user/avatar.jpg")
-    url.add_argument("--prefix", default="", help="OSS 存储目录前缀，默认 ")
+    url.add_argument("--prefix", default="", help="OSS 存储目录前缀，已带前缀的路径不会重复拼接，默认空")
     url.add_argument("--expires", type=int, default=3600, help="私有 Bucket 签名 URL 有效期（秒），默认 3600")
     url.add_argument("--public", action="store_true", help="Bucket 为公共读时直接拼接 URL")
 
