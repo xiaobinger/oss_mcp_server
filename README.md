@@ -16,6 +16,8 @@
 
 </div>
 
+<!-- mcp-name: io.github.xiaobinger/oss-mcp-server -->
+
 > 在 MCP 客户端里说一句「从生产 OSS 下载 lstd/pay/a.png」，模型会自动把「生产」匹配到对应认证分组和 Bucket，然后调用下载工具。
 
 ---
@@ -32,6 +34,7 @@
 - [服务管理脚本](#服务管理脚本)
 - [命令行工具](#命令行工具)
 - [测试](#测试)
+- [发布（维护者）](#发布维护者)
 - [日志与排错](#日志与排错)
 - [安全建议](#安全建议)
 - [已知限制](#已知限制)
@@ -72,6 +75,8 @@ oss_mcp_server/
 │   ├── smoke_service_scripts.sh   # 启动脚本环境准备与依赖检测测试
 │   └── smoke_service_scripts.ps1  # PowerShell 启动流程编排测试
 ├── requirements.txt
+├── pyproject.toml                 # PyPI 打包、依赖与 console script
+├── server.json                    # Official MCP Registry 清单
 ├── README.md
 └── .gitignore
 ```
@@ -124,6 +129,15 @@ python -m pip install -r requirements.txt
 ```
 
 如果使用 PyCharm / IDEA 打开项目，IDE 可能会自动创建一个只有 `pip` 的空 `venv`。启动脚本会检测到缺失依赖并自动补装；若关闭了自动安装，请手动对该解释器执行 `python -m pip install -r requirements.txt`，否则会报 `ModuleNotFoundError: No module named 'oss2'` 或 `'mcp'`。
+
+也可以不克隆仓库，直接从 PyPI 安装（需要 [uv](https://docs.astral.sh/uv/)）：
+
+```bash
+uvx oss-mcp-server --access-key-id AK --access-key-secret SK \
+    --endpoint oss-cn-hangzhou.aliyuncs.com --bucket demo
+```
+
+或者用环境变量 `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` / `OSS_ENDPOINT` / `OSS_BUCKET` 提供凭证，便于直接写进 MCP 客户端配置；多分组配置仍通过 `--config` 指定。
 
 ### 3. 准备配置
 
@@ -343,6 +357,27 @@ python src/oss_mcp_server.py \
 - Windows：`<项目绝对路径>/.venv/Scripts/python.exe`
 
 `--config` 也可以省略，此时服务会读取项目下的 `config/oss_config.json`。stdio 模式下不要手动启动服务，客户端会自行管理进程。
+
+如果使用 PyPI 包，把 `command` 换成 `uvx`、`args` 换成包名，凭证通过 `env` 传入：
+
+```json
+{
+  "mcpServers": {
+    "oss": {
+      "command": "uvx",
+      "args": ["oss-mcp-server"],
+      "env": {
+        "OSS_ACCESS_KEY_ID": "LTAI...",
+        "OSS_ACCESS_KEY_SECRET": "...",
+        "OSS_ENDPOINT": "oss-cn-hangzhou.aliyuncs.com",
+        "OSS_BUCKET": "demo"
+      }
+    }
+  }
+}
+```
+
+多分组仍可在 `args` 中追加 `--config` 指向分组配置文件。
 
 ### 方式二：streamable-http
 
@@ -707,6 +742,23 @@ bash tests/smoke_service_scripts.sh
 - 命令行上传、替换、下载、删除、URL 生成和缺少认证参数的情况。
 
 测试使用内置的假 Bucket 和临时配置，不需要真实 AccessKey，也不会访问真实 OSS。真实环境的权限、网络、签名和 Bucket 策略仍建议上线前用测试 Bucket 联调一次。
+
+## 发布（维护者）
+
+项目按 PyPI 包 `oss-mcp-server` 打包，并在根目录提供 Official MCP Registry 清单 `server.json`。
+
+```bash
+# 构建并发布到 PyPI
+uv build
+uv publish
+
+# 发布到 Official MCP Registry；版本号需与 pyproject.toml、server.json 一致
+mcp-publisher login github
+mcp-publisher validate
+mcp-publisher publish
+```
+
+PulseMCP 当前暂停自助提交，恢复后会从 Official MCP Registry 自动抓取；Smithery 的托管与自助发布入口已关闭，不再需要 `smithery.yaml`。
 
 ## 日志与排错
 

@@ -1,0 +1,80 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.xiaobinger/oss-mcp-server",
+  "title": "Aliyun OSS MCP Server",
+  "description": "Aliyun OSS file tools for MCP: upload, replace, download, zip, delete, signed URLs.",
+  "repository": {
+    "url": "https://github.com/xiaobinger/oss_mcp_server",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "oss-mcp-server",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "OSS_ACCESS_KEY_ID",
+          "description": "Aliyun AccessKey ID with access to the target OSS bucket.",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "OSS_ACCESS_KEY_SECRET",
+          "description": "Aliyun AccessKey Secret paired with OSS_ACCESS_KEY_ID.",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "OSS_ENDPOINT",
+          "description": "OSS endpoint, for example oss-cn-hangzhou.aliyuncs.com.",
+          "isRequired": true,
+          "format": "string",
+          "placeholder": "oss-cn-hangzhou.aliyuncs.com"
+        },
+        {
+          "name": "OSS_BUCKET",
+          "description": "OSS bucket name.",
+          "isRequired": true,
+          "format": "string"
+        },
+        {
+          "name": "OSS_SECURITY_TOKEN",
+          "description": "Optional STS security token for temporary credentials.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "OSS_DOMAIN",
+          "description": "Optional custom domain used for public-read object URLs.",
+          "isRequired": false,
+          "format": "string",
+          "placeholder": "https://static.example.com"
+        },
+        {
+          "name": "OSS_DEFAULT_PREFIX",
+          "description": "Optional default object key prefix added to relative paths.",
+          "isRequired": false,
+          "format": "string",
+          "default": ""
+        },
+        {
+          "name": "OSS_PUBLIC_READ",
+          "description": "Whether the bucket is public-read; true or false.",
+          "isRequired": false,
+          "format": "boolean",
+          "default": "false"
+        }
+      ]
+    }
+  ]
+}
