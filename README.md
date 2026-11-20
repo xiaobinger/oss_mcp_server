@@ -14,6 +14,10 @@
   <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-2F81F7" alt="Platform">
 </p>
 
+<p>
+  <a href="https://mcprush.com/to/aliyun-oss-mcp?ref=badge"><img src="https://mcprush.com/badge/aliyun-oss-mcp/card.svg?theme=light" alt="Aliyun OSS MCP server"></a>
+</p>
+
 </div>
 
 <!-- mcp-name: io.github.xiaobinger/oss-mcp-server -->
